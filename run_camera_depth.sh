@@ -2,9 +2,11 @@
 # Test single camera with lower resolution for faster inference
 # Optional: Set USE_CALIBRATION=1 to use calibrated camera parameters
 # Optional: Set CAMERA_INFO_FILE=/path/to/camera_info.yaml to load from file
+# Optional: Set ENABLE_UNDISTORTION=1 to enable fisheye undistortion
+# Optional: Set UNDISTORTION_BALANCE=0.0 to 1.0 (0.0=crop, 1.0=full FOV)
 
 echo "=========================================="
-echo "Single Camera Fast Test"
+echo "Single Camera Test (with Fisheye Undistortion Support)"
 echo "=========================================="
 echo ""
 
@@ -24,6 +26,10 @@ echo "  - Camera resolution: 1920x1536"
 echo "  - Downsample factor: 2x (960x768 for inference)"
 echo "  - Depth estimation: 518x518 (TensorRT model input)"
 
+# Initialize parameters
+CALIB_PARAMS=""
+UNDISTORT_PARAMS=""
+
 # Check if using calibration file
 if [ -n "${CAMERA_INFO_FILE}" ] && [ -f "${CAMERA_INFO_FILE}" ]; then
     echo "  - Camera parameters: FROM FILE"
@@ -41,6 +47,27 @@ else
     CALIB_PARAMS=""
 fi
 
+# Check if undistortion is enabled
+if [ "${ENABLE_UNDISTORTION}" = "1" ]; then
+    # Default balance to 0.0 if not set
+    BALANCE="${UNDISTORTION_BALANCE:-0.0}"
+    echo "  - Fisheye undistortion: ENABLED"
+    echo "    Balance: ${BALANCE} (0.0=crop, 1.0=full FOV)"
+    UNDISTORT_PARAMS="enable_undistortion:=true undistortion_balance:=${BALANCE}"
+    
+    # Warn if no calibration
+    if [ -z "${CALIB_PARAMS}" ]; then
+        echo ""
+        echo "  ⚠️  WARNING: Undistortion requires calibration parameters!"
+        echo "     Please set USE_CALIBRATION=1 or CAMERA_INFO_FILE"
+        echo ""
+    fi
+else
+    echo "  - Fisheye undistortion: DISABLED"
+    echo "    Tip: Set ENABLE_UNDISTORTION=1 to enable fisheye undistortion"
+    UNDISTORT_PARAMS=""
+fi
+
 echo "  - RViz: enabled"
 echo ""
 echo "Expected: 2-4x faster inference than full resolution"
@@ -53,9 +80,10 @@ echo ""
 ros2 launch depth_anything_v3 camera_depth_rviz.launch.py \
     camera_type:=standard \
     camera_id:=0 \
+    camera_width:=1920 \
+    camera_height:=1536 \
     model_path:=onnx/DA3METRIC-LARGE.onnx \
     publish_rate:=10.0 \
     downsample_factor:=2 \
-    ${CALIB_PARAMS}
-
-
+    ${CALIB_PARAMS} \
+    ${UNDISTORT_PARAMS}

@@ -19,6 +19,7 @@
 
 #include "depth_anything_v3/tensorrt_depth_anything.hpp"
 #include "depth_anything_v3/camera_factory.hpp"
+#include "depth_anything_v3/fisheye_undistorter.hpp"
 
 class CameraDepthNode : public rclcpp::Node
 {
@@ -39,6 +40,10 @@ public:
         this->declare_parameter("sensor_mode", 0);
         this->declare_parameter("downsample_factor", 1);  // New parameter for downsampling
         
+        // Fisheye undistortion parameters
+        this->declare_parameter("enable_undistortion", false);  // Enable fisheye undistortion
+        this->declare_parameter("undistortion_balance", 0.0);   // 0.0=crop, 1.0=full FOV
+        
         // Camera calibration file path (optional)
         this->declare_parameter("camera_info_file", "");
         
@@ -51,9 +56,10 @@ public:
         this->declare_parameter("cy", 767.389372);
         this->declare_parameter("k1", 1.486308);    // Fisheye D[0]
         this->declare_parameter("k2", -13.386609);  // Fisheye D[1]
-        this->declare_parameter("p1", 21.409334);   // Fisheye D[2]
-        this->declare_parameter("p2", 3.817858);    // Fisheye D[3]
+        this->declare_parameter("p1", 21.409334);   // Fisheye D[2] or tangential p1
+        this->declare_parameter("p2", 3.817858);    // Fisheye D[3] or tangential p2
         this->declare_parameter("k3", 0.0);
+        this->declare_parameter("distortion_model", "plumb_bob");  // "fisheye" or "plumb_bob"
         
         camera_type_ = this->get_parameter("camera_type").as_string();
         camera_id_ = this->get_parameter("camera_id").as_int();
@@ -67,6 +73,10 @@ public:
         format_ = this->get_parameter("format").as_string();
         sensor_mode_ = this->get_parameter("sensor_mode").as_int();
         downsample_factor_ = this->get_parameter("downsample_factor").as_int();
+        
+        // Get undistortion parameters
+        enable_undistortion_ = this->get_parameter("enable_undistortion").as_bool();
+        undistortion_balance_ = this->get_parameter("undistortion_balance").as_double();
         
         // Get calibration file path
         std::string camera_info_file = this->get_parameter("camera_info_file").as_string();
@@ -87,6 +97,7 @@ public:
             calib_p1_ = this->get_parameter("p1").as_double();
             calib_p2_ = this->get_parameter("p2").as_double();
             calib_k3_ = this->get_parameter("k3").as_double();
+            distortion_model_ = this->get_parameter("distortion_model").as_string();
         }
         
         RCLCPP_INFO(this->get_logger(), "Camera type: %s", camera_type_.c_str());
@@ -107,6 +118,12 @@ public:
             RCLCPP_INFO(this->get_logger(), "Using calibrated camera parameters:");
             RCLCPP_INFO(this->get_logger(), "  fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f", 
                         calib_fx_, calib_fy_, calib_cx_, calib_cy_);
+            RCLCPP_INFO(this->get_logger(), "  Distortion: k1=%.4f, k2=%.4f, p1=%.4f, p2=%.4f",
+                        calib_k1_, calib_k2_, calib_p1_, calib_p2_);
+        }
+        if (enable_undistortion_) {
+            RCLCPP_INFO(this->get_logger(), "Fisheye undistortion: ENABLED (balance=%.2f)", 
+                        undistortion_balance_);
         }
         
         // Create publishers
@@ -126,6 +143,12 @@ public:
             RCLCPP_ERROR(this->get_logger(), "Failed to initialize camera");
             rclcpp::shutdown();
             return;
+        }
+        
+        // Initialize fisheye undistorter (if enabled)
+        if (!initUndistorter()) {
+            RCLCPP_WARN(this->get_logger(), "Failed to initialize undistorter, continuing without undistortion");
+            enable_undistortion_ = false;
         }
         
         // Initialize depth estimator
@@ -156,6 +179,14 @@ private:
         try {
             RCLCPP_INFO(this->get_logger(), "Loading calibration from: %s", file_path.c_str());
             
+            // Check if file exists
+            std::ifstream file_check(file_path);
+            if (!file_check.good()) {
+                RCLCPP_WARN(this->get_logger(), "Calibration file not found: %s", file_path.c_str());
+                return false;
+            }
+            file_check.close();
+            
             // Load YAML file
             YAML::Node config = YAML::LoadFile(file_path);
             
@@ -168,15 +199,40 @@ private:
             // Read distortion coefficients
             if (config["k1"]) calib_k1_ = config["k1"].as<double>();
             if (config["k2"]) calib_k2_ = config["k2"].as<double>();
-            if (config["p1"]) calib_p1_ = config["p1"].as<double>();
-            if (config["p2"]) calib_p2_ = config["p2"].as<double>();
-            if (config["k3"]) calib_k3_ = config["k3"].as<double>();
+            
+            // Check distortion model to determine how to read coefficients
+            if (config["distortion_model"]) {
+                distortion_model_ = config["distortion_model"].as<std::string>();
+            } else {
+                distortion_model_ = "plumb_bob";  // Default for standard ROS calibration
+            }
+            
+            if (distortion_model_ == "fisheye") {
+                // Fisheye model uses k1, k2, k3, k4
+                if (config["k3"]) calib_p1_ = config["k3"].as<double>();
+                if (config["k4"]) calib_p2_ = config["k4"].as<double>();
+                // Also try p1, p2 as fallback
+                if (config["p1"] && !config["k3"]) calib_p1_ = config["p1"].as<double>();
+                if (config["p2"] && !config["k4"]) calib_p2_ = config["p2"].as<double>();
+                calib_k3_ = 0.0;  // Not used in fisheye
+            } else {
+                // Plumb_bob model uses k1, k2, p1, p2, k3
+                if (config["p1"]) calib_p1_ = config["p1"].as<double>();
+                if (config["p2"]) calib_p2_ = config["p2"].as<double>();
+                if (config["k3"]) calib_k3_ = config["k3"].as<double>();
+            }
             
             RCLCPP_INFO(this->get_logger(), "✓ Calibration loaded successfully");
             RCLCPP_INFO(this->get_logger(), "  fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f", 
                         calib_fx_, calib_fy_, calib_cx_, calib_cy_);
-            RCLCPP_INFO(this->get_logger(), "  Distortion: k1=%.4f, k2=%.4f, p1=%.4f, p2=%.4f, k3=%.4f",
-                        calib_k1_, calib_k2_, calib_p1_, calib_p2_, calib_k3_);
+            RCLCPP_INFO(this->get_logger(), "  Distortion model: %s", distortion_model_.c_str());
+            if (distortion_model_ == "fisheye") {
+                RCLCPP_INFO(this->get_logger(), "  Distortion: k1=%.6f, k2=%.6f, k3=%.6f, k4=%.6f",
+                            calib_k1_, calib_k2_, calib_p1_, calib_p2_);
+            } else {
+                RCLCPP_INFO(this->get_logger(), "  Distortion: k1=%.4f, k2=%.4f, p1=%.4f, p2=%.4f, k3=%.4f",
+                            calib_k1_, calib_k2_, calib_p1_, calib_p2_, calib_k3_);
+            }
             
             return true;
         } catch (const YAML::Exception& e) {
@@ -235,6 +291,121 @@ private:
         camera_info_ = createCameraInfo(frame_width_, frame_height_);
         
         return true;
+    }
+    
+    bool initUndistorter()
+    {
+        RCLCPP_INFO(this->get_logger(), "initUndistorter: enable_undistortion_=%d, use_calibration_=%d",
+                    enable_undistortion_, use_calibration_);
+        
+        if (!enable_undistortion_) {
+            RCLCPP_INFO(this->get_logger(), "Fisheye undistortion: DISABLED");
+            return true;
+        }
+        
+        if (!use_calibration_) {
+            RCLCPP_WARN(this->get_logger(), "Undistortion enabled but no calibration available");
+            RCLCPP_WARN(this->get_logger(), "Please provide calibration parameters via YAML file or ROS parameters");
+            return false;
+        }
+        
+        RCLCPP_INFO(this->get_logger(), "Initializing fisheye undistorter...");
+        RCLCPP_INFO(this->get_logger(), "  Image size: %dx%d", frame_width_, frame_height_);
+        RCLCPP_INFO(this->get_logger(), "  Calibration: fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f",
+                    calib_fx_, calib_fy_, calib_cx_, calib_cy_);
+        RCLCPP_INFO(this->get_logger(), "  Distortion model: %s", distortion_model_.c_str());
+        RCLCPP_INFO(this->get_logger(), "  Distortion: k1=%.4f, k2=%.4f, p1=%.4f, p2=%.4f",
+                    calib_k1_, calib_k2_, calib_p1_, calib_p2_);
+        
+        // Create undistorter configuration
+        depth_anything_v3::FisheyeUndistorter::Config config;
+        config.enabled = true;
+        config.balance = undistortion_balance_;
+        config.image_size = cv::Size(frame_width_, frame_height_);
+        config.distortion_model = distortion_model_;
+        
+        // Create camera matrix
+        config.camera_matrix = (cv::Mat_<double>(3, 3) <<
+            calib_fx_, 0, calib_cx_,
+            0, calib_fy_, calib_cy_,
+            0, 0, 1);
+        
+        // Create distortion coefficients based on model
+        if (distortion_model_ == "fisheye") {
+            // Fisheye model uses 4 coefficients: k1, k2, k3, k4
+            config.distortion_coeffs = (cv::Mat_<double>(4, 1) <<
+                calib_k1_, calib_k2_, calib_p1_, calib_p2_);
+        } else {
+            // Standard pinhole model uses 5 coefficients: k1, k2, p1, p2, k3
+            config.distortion_coeffs = (cv::Mat_<double>(5, 1) <<
+                calib_k1_, calib_k2_, calib_p1_, calib_p2_, calib_k3_);
+        }
+        
+        // Initialize undistorter
+        undistorter_ = std::make_unique<depth_anything_v3::FisheyeUndistorter>();
+        if (!undistorter_->initialize(config)) {
+            RCLCPP_ERROR(this->get_logger(), "Failed to initialize fisheye undistorter");
+            undistorter_.reset();
+            return false;
+        }
+        
+        // Update camera info with new camera matrix (for undistorted images)
+        undistorted_camera_info_ = createUndistortedCameraInfo();
+        
+        RCLCPP_INFO(this->get_logger(), "✓ Fisheye undistorter initialized");
+        RCLCPP_INFO(this->get_logger(), "  Undistorted size: %dx%d", 
+                    undistorter_->getUndistortedSize().width,
+                    undistorter_->getUndistortedSize().height);
+        RCLCPP_INFO(this->get_logger(), "  New intrinsics: fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f",
+                    undistorter_->getNewFx(), undistorter_->getNewFy(),
+                    undistorter_->getNewCx(), undistorter_->getNewCy());
+        
+        return true;
+    }
+    
+    sensor_msgs::msg::CameraInfo createUndistortedCameraInfo()
+    {
+        sensor_msgs::msg::CameraInfo camera_info;
+        
+        if (!undistorter_ || !undistorter_->isReady()) {
+            return camera_info_;  // Return original if undistorter not ready
+        }
+        
+        cv::Size size = undistorter_->getUndistortedSize();
+        camera_info.width = size.width;
+        camera_info.height = size.height;
+        
+        // Use new camera matrix from undistorter
+        double fx = undistorter_->getNewFx();
+        double fy = undistorter_->getNewFy();
+        double cx = undistorter_->getNewCx();
+        double cy = undistorter_->getNewCy();
+        
+        // Intrinsic matrix K
+        camera_info.k[0] = fx;
+        camera_info.k[2] = cx;
+        camera_info.k[4] = fy;
+        camera_info.k[5] = cy;
+        camera_info.k[8] = 1.0;
+        
+        // Distortion coefficients are ZERO for undistorted image
+        camera_info.d.resize(5, 0.0);
+        
+        // Rectification matrix (identity)
+        camera_info.r[0] = 1.0;
+        camera_info.r[4] = 1.0;
+        camera_info.r[8] = 1.0;
+        
+        // Projection matrix
+        camera_info.p[0] = fx;
+        camera_info.p[2] = cx;
+        camera_info.p[5] = fy;
+        camera_info.p[6] = cy;
+        camera_info.p[10] = 1.0;
+        
+        camera_info.header.frame_id = frame_id_;
+        
+        return camera_info;
     }
     
     bool initDepthEstimator()
@@ -468,22 +639,51 @@ private:
             return;
         }
         
+        // Apply fisheye undistortion if enabled
+        cv::Mat frame_processed = frame;
+        sensor_msgs::msg::CameraInfo active_camera_info = camera_info_;
+        
+        // Debug: Log undistortion status periodically
+        static int frame_count = 0;
+        if (frame_count++ % 100 == 0) {
+            RCLCPP_INFO(this->get_logger(), "Undistortion status: enable=%d, undistorter=%s, ready=%s",
+                        enable_undistortion_,
+                        undistorter_ ? "yes" : "no",
+                        (undistorter_ && undistorter_->isReady()) ? "yes" : "no");
+        }
+        
+        if (enable_undistortion_ && undistorter_ && undistorter_->isReady()) {
+            auto undistort_start = std::chrono::high_resolution_clock::now();
+            cv::Mat undistorted;
+            if (undistorter_->undistort(frame, undistorted)) {
+                frame_processed = undistorted;
+                active_camera_info = undistorted_camera_info_;
+                
+                auto undistort_end = std::chrono::high_resolution_clock::now();
+                auto undistort_ms = std::chrono::duration_cast<std::chrono::microseconds>(
+                    undistort_end - undistort_start).count() / 1000.0;
+                RCLCPP_DEBUG(this->get_logger(), "Undistortion time: %.2f ms", undistort_ms);
+            } else {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                    "Undistortion failed, using original frame");
+            }
+        }
+        
         // Downsample if requested (for faster inference)
-        cv::Mat frame_for_inference = frame;
-        sensor_msgs::msg::CameraInfo inference_camera_info = camera_info_;
+        cv::Mat frame_for_inference = frame_processed;
+        sensor_msgs::msg::CameraInfo inference_camera_info = active_camera_info;
         
         if (downsample_factor_ > 1) {
             cv::Mat downsampled;
-            cv::resize(frame, downsampled, 
-                      cv::Size(frame.cols / downsample_factor_, frame.rows / downsample_factor_),
+            cv::resize(frame_processed, downsampled, 
+                      cv::Size(frame_processed.cols / downsample_factor_, 
+                               frame_processed.rows / downsample_factor_),
                       0, 0, cv::INTER_LINEAR);
             frame_for_inference = downsampled;
             
             // Update camera info for downsampled resolution
-            inference_camera_info = createCameraInfo(
-                frame_for_inference.cols, 
-                frame_for_inference.rows
-            );
+            // Scale the active camera info (which may be undistorted)
+            inference_camera_info = scaleDownCameraInfo(active_camera_info, downsample_factor_);
         }
         
         auto stamp = this->now();
@@ -503,7 +703,7 @@ private:
         
         const cv::Mat& depth_image = depth_estimator_->getDepthImage();
         
-        // Publish input image (use downsampled frame for consistency)
+        // Publish input image (use processed frame - undistorted if enabled)
         auto input_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", frame_for_inference).toImageMsg();
         input_msg->header.stamp = stamp;
         input_msg->header.frame_id = frame_id_;
@@ -522,7 +722,7 @@ private:
         depth_colored_msg->header.frame_id = frame_id_;
         depth_colored_pub_->publish(*depth_colored_msg);
         
-        // Publish point cloud with correct camera info
+        // Publish point cloud with correct camera info (undistorted if enabled)
         sensor_msgs::msg::PointCloud2 cloud_msg;
         createPointCloudWithCameraInfo(depth_image, frame_rgb, inference_camera_info, cloud_msg);
         pointcloud_pub_->publish(cloud_msg);
@@ -530,6 +730,30 @@ private:
         // Publish camera info (use inference camera info for consistency)
         inference_camera_info.header.stamp = stamp;
         camera_info_pub_->publish(inference_camera_info);
+    }
+    
+    sensor_msgs::msg::CameraInfo scaleDownCameraInfo(
+        const sensor_msgs::msg::CameraInfo& original, int factor)
+    {
+        sensor_msgs::msg::CameraInfo scaled = original;
+        
+        scaled.width = original.width / factor;
+        scaled.height = original.height / factor;
+        
+        // Scale intrinsics
+        double scale = 1.0 / factor;
+        scaled.k[0] *= scale;  // fx
+        scaled.k[2] *= scale;  // cx
+        scaled.k[4] *= scale;  // fy
+        scaled.k[5] *= scale;  // cy
+        
+        // Scale projection matrix
+        scaled.p[0] *= scale;  // fx
+        scaled.p[2] *= scale;  // cx
+        scaled.p[5] *= scale;  // fy
+        scaled.p[6] *= scale;  // cy
+        
+        return scaled;
     }
     
     // Parameters
@@ -547,6 +771,10 @@ private:
     int sensor_mode_;
     int downsample_factor_;  // Downsample factor for faster inference
     
+    // Fisheye undistortion parameters
+    bool enable_undistortion_;
+    double undistortion_balance_;
+    
     // Camera calibration parameters
     bool use_calibration_;
     double calib_fx_;
@@ -558,10 +786,15 @@ private:
     double calib_p1_;
     double calib_p2_;
     double calib_k3_;
+    std::string distortion_model_;
     
     // Camera
     std::unique_ptr<depth_anything_v3::CameraCapture> camera_capture_;
     sensor_msgs::msg::CameraInfo camera_info_;
+    
+    // Fisheye undistorter
+    std::unique_ptr<depth_anything_v3::FisheyeUndistorter> undistorter_;
+    sensor_msgs::msg::CameraInfo undistorted_camera_info_;
     
     // Depth estimator
     std::unique_ptr<depth_anything_v3::TensorRTDepthAnything> depth_estimator_;

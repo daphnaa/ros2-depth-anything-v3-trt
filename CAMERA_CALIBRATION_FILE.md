@@ -99,6 +99,58 @@ k3: 0.0
 CAMERA_INFO_FILE=my_camera_calibration.yaml ./run_camera_depth.sh
 ```
 
+## 鱼眼畸变矫正 (Fisheye Undistortion)
+
+### 概述
+
+系统支持鱼眼镜头畸变矫正功能，可以将鱼眼图像转换为直线图像（rectilinear），使直线在图像中显示为直线。
+
+### 启用畸变矫正
+
+```bash
+# 基本用法：启用畸变矫正
+ENABLE_UNDISTORTION=1 CAMERA_INFO_FILE=camera_info_example.yaml ./run_camera_depth.sh
+
+# 带平衡参数：控制裁剪与视野的权衡
+ENABLE_UNDISTORTION=1 UNDISTORTION_BALANCE=0.5 CAMERA_INFO_FILE=camera_info_example.yaml ./run_camera_depth.sh
+```
+
+### 参数说明
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `ENABLE_UNDISTORTION` | 启用畸变矫正 | `0` (禁用) |
+| `UNDISTORTION_BALANCE` | 平衡参数 (0.0-1.0) | `0.0` |
+
+### 平衡参数 (Balance)
+
+- **0.0** - 完全裁剪：只保留有效像素区域，无黑边，但视野较小
+- **1.0** - 完整视野：保留完整视野，但边缘会有黑边
+- **0.5** - 折中方案：平衡裁剪和视野
+
+### 工作原理
+
+1. 读取相机标定参数（内参和畸变系数）
+2. 使用 OpenCV fisheye 模块计算畸变矫正映射表
+3. 对每帧图像应用畸变矫正
+4. 更新相机内参为矫正后的参数
+5. 使用矫正后的图像进行深度估计和点云生成
+
+### 性能
+
+- 畸变矫正使用预计算的映射表，运行时只需执行 `cv::remap`
+- 典型延迟：< 5ms @ 1920x1536 分辨率
+- 可通过 ROS2 DEBUG 日志查看实际耗时：
+  ```bash
+  ros2 run depth_anything_v3 camera_depth_node --ros-args --log-level debug
+  ```
+
+### 注意事项
+
+- **必须提供标定参数**：畸变矫正需要准确的相机标定参数
+- **分辨率匹配**：标定参数应与实际相机分辨率匹配
+- **畸变模型**：使用 OpenCV fisheye 模型（4 个畸变系数）
+
 ## 标定相机
 
 如果你需要重新标定相机，可以使用 ROS 2 标定工具：
@@ -131,11 +183,20 @@ ros2 run camera_calibration cameracalibrator \
 [camera_depth_node]:   Distortion: k1=1.4863, k2=-13.3866, p1=21.4093, p2=3.8179, k3=0.0000
 ```
 
+启用畸变矫正时，还会显示：
+
+```
+[camera_depth_node]: Fisheye undistortion: ENABLED (balance=0.00)
+[camera_depth_node]: ✓ Fisheye undistorter initialized
+[camera_depth_node]:   Undistorted size: 1920x1536
+[camera_depth_node]:   New intrinsics: fx=xxx.xx, fy=xxx.xx, cx=xxx.xx, cy=xxx.xx
+```
+
 ### 检查点云质量
 
 1. 启动系统并打开 RViz
 2. 查看点云是否有重叠
-3. 检查直线是否笔直
+3. 检查直线是否笔直（启用畸变矫正后）
 4. 验证深度缩放是否正确
 
 ## 故障排除
@@ -162,6 +223,22 @@ ros2 run camera_calibration cameracalibrator \
 - 检查 YAML 语法是否正确
 - 确保所有参数都是数字类型
 - 检查缩进是否正确
+
+### 畸变矫正初始化失败
+
+```
+[camera_depth_node]: Failed to initialize fisheye undistorter
+```
+
+**可能原因**：
+1. 标定参数不正确或极端
+2. 畸变系数导致数值不稳定
+3. 相机矩阵无效
+
+**解决方法**：
+1. 检查标定参数是否合理
+2. 尝试重新标定相机
+3. 检查畸变系数是否在合理范围内
 
 ### 点云仍然重叠
 
@@ -199,13 +276,25 @@ ros2 run camera_calibration cameracalibrator \
 CAMERA_INFO_FILE=camera_info_example.yaml ./run_camera_depth.sh
 ```
 
-### 示例 2：使用环境变量（旧方法）
+### 示例 2：使用 YAML 文件 + 畸变矫正
+
+```bash
+CAMERA_INFO_FILE=camera_info_example.yaml ENABLE_UNDISTORTION=1 ./run_camera_depth.sh
+```
+
+### 示例 3：使用 YAML 文件 + 畸变矫正 + 自定义平衡
+
+```bash
+CAMERA_INFO_FILE=camera_info_example.yaml ENABLE_UNDISTORTION=1 UNDISTORTION_BALANCE=0.5 ./run_camera_depth.sh
+```
+
+### 示例 4：使用环境变量（旧方法）
 
 ```bash
 USE_CALIBRATION=1 ./run_camera_depth.sh
 ```
 
-### 示例 3：不使用标定
+### 示例 5：不使用标定
 
 ```bash
 ./run_camera_depth.sh

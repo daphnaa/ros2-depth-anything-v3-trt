@@ -79,6 +79,19 @@ def generate_launch_description():
     p2_arg = DeclareLaunchArgument('p2', default_value='3.817858', description='Fisheye distortion D[3]')
     k3_arg = DeclareLaunchArgument('k3', default_value='0.0', description='Distortion k3 (unused for fisheye)')
     
+    # Fisheye undistortion parameters
+    enable_undistortion_arg = DeclareLaunchArgument(
+        'enable_undistortion',
+        default_value='false',
+        description='Enable fisheye undistortion (requires calibration)'
+    )
+    
+    undistortion_balance_arg = DeclareLaunchArgument(
+        'undistortion_balance',
+        default_value='0.0',
+        description='Undistortion balance: 0.0=crop to valid pixels, 1.0=full FOV with black borders'
+    )
+    
     # Camera depth node
     camera_depth_node = Node(
         package='depth_anything_v3',
@@ -105,6 +118,8 @@ def generate_launch_description():
             'p1': LaunchConfiguration('p1'),
             'p2': LaunchConfiguration('p2'),
             'k3': LaunchConfiguration('k3'),
+            'enable_undistortion': LaunchConfiguration('enable_undistortion'),
+            'undistortion_balance': LaunchConfiguration('undistortion_balance'),
         }],
         remappings=[
             ('~/input/image', '/camera/image'),
@@ -145,6 +160,8 @@ def generate_launch_description():
         use_calibration_arg,
         fx_arg, fy_arg, cx_arg, cy_arg,
         k1_arg, k2_arg, p1_arg, p2_arg, k3_arg,
+        enable_undistortion_arg,
+        undistortion_balance_arg,
         camera_depth_node,
         static_tf_node,
         rviz_node,

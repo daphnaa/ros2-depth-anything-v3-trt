@@ -191,6 +191,7 @@ add_executable(camera_depth_node
   src/camera_capture/standard_camera_capture.cpp
   src/camera_capture/gmsl_camera_capture.cpp
   src/camera_capture/camera_factory.cpp
+  src/camera_capture/fisheye_undistorter.cpp
   src/tensorrt_depth_anything/tensorrt_depth_anything.cpp
   src/tensorrt_common/tensorrt_common.cpp
   src/tensorrt_common/simple_profiler.cpp
@@ -327,6 +328,25 @@ if(BUILD_TESTING)
   )
   
   ament_target_dependencies(test_gstreamer_pipeline
+    rclcpp
+  )
+  
+  # Fisheye undistorter property test
+  ament_add_gtest(test_fisheye_undistorter
+    test/test_fisheye_undistorter.cpp
+    src/camera_capture/fisheye_undistorter.cpp
+  )
+  
+  target_include_directories(test_fisheye_undistorter PRIVATE
+    include
+    ${OpenCV_INCLUDE_DIRS}
+  )
+  
+  target_link_libraries(test_fisheye_undistorter
+    ${OpenCV_LIBRARIES}
+  )
+  
+  ament_target_dependencies(test_fisheye_undistorter
     rclcpp
   )
 endif()
