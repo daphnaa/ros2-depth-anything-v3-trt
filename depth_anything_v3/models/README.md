@@ -19,8 +19,19 @@ Expected model specifications:
 ## Installation
 
 After building the package, this directory will be installed to:
-```
+```bash
 /path/to/install/share/depth_anything_v3/models/
 ```
 
 The node will look for models at the path specified in the parameter file.
+
+## Runtime Comparison
+
+Use Polygraphy to compare ONNX Runtime and TensorRT performance:
+```bash
+polygraphy run src/target/depth_anything_v3/models/DA3METRIC-LARGE.onnx \
+    --onnxrt --providers cuda \
+    --trt --fp16 \
+    --iterations 100 \
+    --warm-up 10
+```
