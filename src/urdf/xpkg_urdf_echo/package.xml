@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<package format="3">
+    <name>xpkg_urdf_echo</name>
+    <version>0.1.0</version>
+    <description>The xpkg_urdf_echo package</description>
+    <maintainer email="blank@invalid.example">blank</maintainer>
+    <license>Apache 2.0</license>
+
+    <buildtool_depend condition="$ROS_VERSION == 1">catkin</buildtool_depend>
+    <depend condition="$ROS_VERSION == 1">roslaunch</depend>
+    <depend condition="$ROS_VERSION == 1">joint_state_publisher</depend>
+    <depend condition="$ROS_VERSION == 1">robot_state_publisher</depend>
+    <depend condition="$ROS_VERSION == 1">rviz</depend>
+    <depend condition="$ROS_VERSION == 1">gazebo</depend>
+
+
+    <buildtool_depend condition="$ROS_VERSION == 2">ament_cmake</buildtool_depend>
+    <exec_depend condition="$ROS_VERSION == 2">joint_state_publisher</exec_depend>
+    <exec_depend condition="$ROS_VERSION == 2">robot_state_publisher</exec_depend>
+    <exec_depend condition="$ROS_VERSION == 2">rviz2</exec_depend>
+    <exec_depend condition="$ROS_VERSION == 2">xacro</exec_depend>
+
+    
+    <export>
+        <build_type condition="$ROS_VERSION == 2">ament_cmake</build_type>
+    </export>
+</package>

@@ -1,0 +1,19 @@
+<launch>
+    <arg name="visual" default="true" />
+
+    <param name="/use_sim_time" value="true" />
+    <include file="$(find gazebo_ros)/launch/empty_world.launch" />
+
+    <arg name="model" default="$(find xpkg_urdf_echo)/urdf/sim_base.xacro"/>
+    <param name="robot_description" command="$(find xacro)/xacro $(arg model)" />
+    <node name="urdf_spawner" pkg="gazebo_ros" type="spawn_model" respawn="false"
+          args="-urdf -model mrobot -param robot_description" />
+
+    <node name="joint_state_publisher" pkg="joint_state_publisher" type="joint_state_publisher" />
+    <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" />
+
+    <group if="$(arg visual)" >
+        <node name="rviz" pkg="rviz" type="rviz" required="true" 
+              args="-d $(find xpkg_urdf_echo)/config/ROS1/urdf.rviz"/>
+    </group>
+</launch>

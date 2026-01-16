@@ -1,0 +1,16 @@
+<!--xnode_comm_test.launch-->
+<launch> 
+  	<node name="xnode_comm" pkg="xpkg_comm" type="xnode_comm" output="screen" >
+                <param name="dev_list" value="true"/>
+
+                <param name="com_enable" value="true"/>
+                <param name="com_channel_common" value="false"/>
+                <param name="com_channel_xstd" value="true"/>
+
+                <param name="tcp_enable" value="false"/>
+                <param name="tcp_channel_common" value="true"/>
+                <param name="tcp_channel_xstd" value="false"/>
+                <param name="tcp_addr" type = "string" value="115.29.240.46"/>
+                <param name="tcp_port" value="9000"/>
+	</node>        
+</launch>
