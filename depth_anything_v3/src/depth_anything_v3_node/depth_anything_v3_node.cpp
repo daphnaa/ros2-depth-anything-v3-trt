@@ -82,11 +82,10 @@ DepthAnythingV3Node::DepthAnythingV3Node(const rclcpp::NodeOptions & node_option
   RCLCPP_INFO(get_logger(), "Using model file: %s", node_param_.onnx_path.c_str());
 
   // Synchronized subscribers for compressed image and camera_info
-  // Use SensorDataQoS to match typical image publishers (Best Effort reliability)
   sub_compressed_image_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::CompressedImage>>(
-    this, "~/input/image", rclcpp::SensorDataQoS().get_rmw_qos_profile());
+    this, "~/input/image");
   sub_camera_info_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::CameraInfo>>(
-    this, "~/input/camera_info", rclcpp::SensorDataQoS().get_rmw_qos_profile());
+    this, "~/input/camera_info");
   
   // Use approximate time synchronizer with 100ms tolerance
   sync_ = std::make_shared<message_filters::Synchronizer<ApproxSyncPolicy>>(

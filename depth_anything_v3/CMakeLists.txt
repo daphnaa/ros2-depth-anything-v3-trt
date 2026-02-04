@@ -31,7 +31,12 @@ find_package(rclcpp_components REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(message_filters REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(OpenCV 4 REQUIRED)
+find_package(PCL REQUIRED COMPONENTS common io visualization)
+find_package(yaml-cpp REQUIRED)
 
 # Find CUDA
 find_package(CUDA REQUIRED)
@@ -61,7 +66,11 @@ include_directories(
   ${TENSORRT_INCLUDE_DIR}
   ${CUDA_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
+  ${PCL_INCLUDE_DIRS}
 )
+
+link_directories(${PCL_LIBRARY_DIRS})
+add_definitions(${PCL_DEFINITIONS})
 
 # Create TensorRT depth inference library
 add_library(tensorrt_depth_anything SHARED
@@ -144,12 +153,130 @@ target_link_libraries(generate_engines
   ${CUDA_cusparse_LIBRARY}
 )
 
+# Create standalone demo executable (no ROS dependencies)
+# Commented out - file does not exist
+# add_executable(standalone_demo
+#   src/standalone_demo.cpp
+#   src/tensorrt_depth_anything/tensorrt_depth_anything.cpp
+#   src/tensorrt_common/tensorrt_common.cpp
+#   src/tensorrt_common/simple_profiler.cpp
+# )
+# 
+# target_include_directories(standalone_demo PRIVATE
+#   include
+#   ${OpenCV_INCLUDE_DIRS}
+#   ${CUDA_INCLUDE_DIRS}
+#   ${TENSORRT_INCLUDE_DIR}
+# )
+# 
+# target_link_libraries(standalone_demo
+#   ${TENSORRT_LIBRARY}
+#   ${CUDA_LIBRARIES}
+#   ${OpenCV_LIBRARIES}
+#   ${CUDA_CUBLAS_LIBRARIES}
+#   ${CUDA_curand_LIBRARY}
+#   ${CUDA_cusparse_LIBRARY}
+#   ${PCL_LIBRARIES}
+# )
+# 
+# # Minimal ROS dependencies for standalone demo (only for message types)
+# ament_target_dependencies(standalone_demo
+#   rclcpp
+#   sensor_msgs
+# )
+
+# Create camera depth node executable
+add_executable(camera_depth_node
+  src/camera_depth_node.cpp
+  src/camera_capture/standard_camera_capture.cpp
+  src/camera_capture/gmsl_camera_capture.cpp
+  src/camera_capture/camera_factory.cpp
+  src/camera_capture/fisheye_undistorter.cpp
+  src/tensorrt_depth_anything/tensorrt_depth_anything.cpp
+  src/tensorrt_common/tensorrt_common.cpp
+  src/tensorrt_common/simple_profiler.cpp
+)
+
+target_include_directories(camera_depth_node PRIVATE
+  include
+  ${OpenCV_INCLUDE_DIRS}
+  ${CUDA_INCLUDE_DIRS}
+  ${TENSORRT_INCLUDE_DIR}
+)
+
+target_link_libraries(camera_depth_node
+  ${TENSORRT_LIBRARY}
+  ${CUDA_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${CUDA_CUBLAS_LIBRARIES}
+  ${CUDA_curand_LIBRARY}
+  ${CUDA_cusparse_LIBRARY}
+  yaml-cpp
+)
+
+ament_target_dependencies(camera_depth_node
+  rclcpp
+  sensor_msgs
+  cv_bridge
+)
+
+# Create video depth node executable
+add_executable(video_depth_node
+  src/video_depth_node.cpp
+  src/tensorrt_depth_anything/tensorrt_depth_anything.cpp
+  src/tensorrt_common/tensorrt_common.cpp
+  src/tensorrt_common/simple_profiler.cpp
+)
+
+target_include_directories(video_depth_node PRIVATE
+  include
+  ${OpenCV_INCLUDE_DIRS}
+  ${CUDA_INCLUDE_DIRS}
+  ${TENSORRT_INCLUDE_DIR}
+)
+
+target_link_libraries(video_depth_node
+  ${TENSORRT_LIBRARY}
+  ${CUDA_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${CUDA_CUBLAS_LIBRARIES}
+  ${CUDA_curand_LIBRARY}
+  ${CUDA_cusparse_LIBRARY}
+)
+
+ament_target_dependencies(video_depth_node
+  rclcpp
+  sensor_msgs
+  cv_bridge
+)
+
+# Create point cloud fusion node executable
+add_executable(point_cloud_fusion_node
+  src/point_cloud_fusion_node.cpp
+)
+
+target_include_directories(point_cloud_fusion_node PRIVATE
+  include
+)
+
+ament_target_dependencies(point_cloud_fusion_node
+  rclcpp
+  sensor_msgs
+  tf2_ros
+  tf2_sensor_msgs
+  geometry_msgs
+)
+
 # Install targets
 install(TARGETS
   tensorrt_depth_anything
   depth_anything_v3_node
   depth_anything_v3_main
   generate_engines
+  # standalone_demo  # Commented out - file does not exist
+  camera_depth_node
+  video_depth_node
+  point_cloud_fusion_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
@@ -166,6 +293,62 @@ install(DIRECTORY config launch models
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
+  
+  # Find Google Test
+  find_package(ament_cmake_gtest REQUIRED)
+  
+  # Camera type selection property test
+  ament_add_gtest(test_camera_type_selection
+    test/test_camera_type_selection.cpp
+    src/camera_capture/standard_camera_capture.cpp
+    src/camera_capture/gmsl_camera_capture.cpp
+    src/camera_capture/camera_factory.cpp
+  )
+  
+  target_include_directories(test_camera_type_selection PRIVATE
+    include
+    ${OpenCV_INCLUDE_DIRS}
+  )
+  
+  target_link_libraries(test_camera_type_selection
+    ${OpenCV_LIBRARIES}
+  )
+  
+  ament_target_dependencies(test_camera_type_selection
+    rclcpp
+  )
+  
+  # GStreamer pipeline construction property test
+  ament_add_gtest(test_gstreamer_pipeline
+    test/test_gstreamer_pipeline.cpp
+  )
+  
+  target_include_directories(test_gstreamer_pipeline PRIVATE
+    include
+  )
+  
+  ament_target_dependencies(test_gstreamer_pipeline
+    rclcpp
+  )
+  
+  # Fisheye undistorter property test
+  ament_add_gtest(test_fisheye_undistorter
+    test/test_fisheye_undistorter.cpp
+    src/camera_capture/fisheye_undistorter.cpp
+  )
+  
+  target_include_directories(test_fisheye_undistorter PRIVATE
+    include
+    ${OpenCV_INCLUDE_DIRS}
+  )
+  
+  target_link_libraries(test_fisheye_undistorter
+    ${OpenCV_LIBRARIES}
+  )
+  
+  ament_target_dependencies(test_fisheye_undistorter
+    rclcpp
+  )
 endif()
 
 ament_export_libraries(tensorrt_depth_anything depth_anything_v3_node)

@@ -34,18 +34,23 @@ class DepthAnything3OnnxWrapper(nn.Module):
         super().__init__()
         self.model = api_model
 
-    def forward(self, image: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+    def forward(self, image: torch.Tensor):  # type: ignore[override]
         # The caller is expected to validate shapes before export; keep traced graph minimal.
         model_in = image.unsqueeze(1)  # add single-view dimension
-        output = self.model(
+        # Call the underlying model directly to bypass autocast (which causes mixed precision in ONNX)
+        output = self.model.model(
             model_in,
             extrinsics=None,
             intrinsics=None,
             export_feat_layers=[],
             infer_gs=False,
         )
+        # Depth is always expected. Sky may be missing for some checkpoints; export a zero
+        # sky tensor in that case so downstream TensorRT code can rely on a 'sky' output.
         depth = output["depth"]  # [B, 1, H, W] for monocular models
-        sky = output["sky"]
+        sky = output.get("sky") if isinstance(output, dict) else None
+        if sky is None:
+            sky = torch.zeros_like(depth)
         return depth, sky
 
 
@@ -90,7 +95,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda",
+        default="cpu",
         help="Device to export on (cpu or cuda).",
     )
     parser.add_argument(
@@ -123,6 +128,11 @@ def parse_args() -> argparse.Namespace:
 def load_model(model_dir: Path, device: torch.device) -> DepthAnything3:
     api_model = DepthAnything3.from_pretrained(model_dir.as_posix())
     api_model = api_model.to(device)
+    # Ensure all parameters and buffers are float32
+    for param in api_model.parameters():
+        param.data = param.data.float()
+    for buffer in api_model.buffers():
+        buffer.data = buffer.data.float()
     api_model.eval()
     return api_model
 
@@ -140,7 +150,9 @@ def export_onnx(
         raise ValueError(f"height and width must be divisible by {PATCH_SIZE}.")
 
     if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is not available.")
+        # Fall back to CPU when CUDA is not available instead of failing hard.
+        print("Warning: CUDA was requested but is not available. Falling back to CPU export.")
+        device = torch.device("cpu")
 
     os.environ["TORCHDYNAMO_DISABLE"] = "1"
 
@@ -221,6 +233,10 @@ def run_onnx_demo(
     if not image_path.is_file():
         raise FileNotFoundError(f"Image not found: {image_path}")
 
+    if ort is None:
+        raise RuntimeError(
+            "onnxruntime is not available or failed to import. Install a compatible onnxruntime or run export without demo."
+        )
     sess = ort.InferenceSession(onnx_path.as_posix(), providers=["CPUExecutionProvider"])
     input_name = sess.get_inputs()[0].name
     target_h, target_w = _infer_size_from_input(sess.get_inputs()[0], default_h=518, default_w=518)
@@ -236,13 +252,6 @@ def run_onnx_demo(
         depth_out_path = image_path.with_name(f"{image_path.stem}_depth.png")
     depth_vis = visualize_depth(depth, ret_type=np.uint8)
     Image.fromarray(depth_vis).save(depth_out_path)
-
-
-    sky = out_dict["sky"].squeeze()
-    print(
-        f"[DEMO] Sky stats: min={float(sky.min()):.4f}, "
-        f"max={float(sky.max()):.4f}, mean={float(sky.mean()):.4f}"
-    )
 
     # Compute focal scaling based on original intrinsics and resize
     orig_w, orig_h = Image.open(image_path).size
