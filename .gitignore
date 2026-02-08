@@ -40,6 +40,7 @@ qtcreator-*
 COLCON_IGNORE
 AMENT_IGNORE
 
+da3_env/
 
 
 *.mp4
