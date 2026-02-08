@@ -24,7 +24,18 @@ if [ ! -f "install/setup.bash" ]; then
     exit 1
 fi
 
-source install/setup.bash
+# Source workspace install/setup.bash reliably even if script is run from another cwd
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+if [ -f "$WORKSPACE_ROOT/install/setup.bash" ]; then
+    # shellcheck disable=SC1090
+    source "$WORKSPACE_ROOT/install/setup.bash"
+else
+    echo "Warning: workspace install/setup.bash not found at $WORKSPACE_ROOT/install/setup.bash"
+    echo "Falling back to system ROS 2 setup (/opt/ros/humble/setup.bash)"
+    # shellcheck disable=SC1091
+    source /opt/ros/humble/setup.bash
+fi
 
 echo "✓ Environment check complete"
 echo ""
@@ -142,4 +153,5 @@ ros2 launch depth_anything_v3 video_depth_rviz.launch.py \
   video_path:="$VIDEO_PATH" \
   playback_speed:=$SPEED \
   loop:=$LOOP \
-  scale_factor:=$SCALE
+  scale_factor:=$SCALE \
+  model_path:=src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.fp16.engine \

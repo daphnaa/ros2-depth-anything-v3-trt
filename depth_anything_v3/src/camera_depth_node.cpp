@@ -60,6 +60,21 @@ public:
         this->declare_parameter("p2", 3.817858);    // Fisheye D[3] or tangential p2
         this->declare_parameter("k3", 0.0);
         this->declare_parameter("distortion_model", "plumb_bob");  // "fisheye" or "plumb_bob"
+
+        // Timing debug parameters
+        this->declare_parameter("debug_timing", true);
+        this->declare_parameter("debug_timing_throttle_ms", 1000);
+        debug_timing_ = this->get_parameter("debug_timing").as_bool();
+        debug_timing_throttle_ms_ = this->get_parameter("debug_timing_throttle_ms").as_int();
+
+        // Camera recovery parameters
+        this->declare_parameter("camera_reconnect_enable", true);
+        this->declare_parameter("camera_reconnect_backoff_ms", 500);
+        this->declare_parameter("camera_reconnect_max_backoff_ms", 5000);
+        this->declare_parameter("camera_failures_before_reconnect", 3);
+
+
+
         
         camera_type_ = this->get_parameter("camera_type").as_string();
         camera_id_ = this->get_parameter("camera_id").as_int();
@@ -99,6 +114,13 @@ public:
             calib_k3_ = this->get_parameter("k3").as_double();
             distortion_model_ = this->get_parameter("distortion_model").as_string();
         }
+
+        // camera recovery parameters
+        camera_reconnect_enable_ = this->get_parameter("camera_reconnect_enable").as_bool();
+        camera_reconnect_backoff_ms_ = this->get_parameter("camera_reconnect_backoff_ms").as_int();
+        camera_reconnect_max_backoff_ms_ = this->get_parameter("camera_reconnect_max_backoff_ms").as_int();
+        camera_failures_before_reconnect_ = this->get_parameter("camera_failures_before_reconnect").as_int();
+
         
         RCLCPP_INFO(this->get_logger(), "Camera type: %s", camera_type_.c_str());
         if (camera_type_ == "standard") {
@@ -127,16 +149,17 @@ public:
         }
         
         // Create publishers
+        auto qos = rclcpp::SensorDataQoS().keep_last(1);
         image_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
-            "~/input/image", 10);
+            "~/input/image", qos);
         depth_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
-            "~/output/depth_image", 10);
+            "~/output/depth_image", qos);
         depth_colored_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
-            "~/output/depth_colored", 10);
+            "~/output/depth_colored", qos);
         pointcloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-            "~/output/point_cloud", 10);
+            "~/output/point_cloud", qos);
         camera_info_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(
-            "~/camera_info", 10);
+            "~/camera_info", qos);
         
         // Initialize camera
         if (!initCamera()) {
@@ -539,15 +562,17 @@ private:
     void createPointCloud(
         const cv::Mat& depth_image,
         const cv::Mat& rgb_image,
+        const rclcpp::Time& stamp,
         sensor_msgs::msg::PointCloud2& cloud_msg)
     {
-        createPointCloudWithCameraInfo(depth_image, rgb_image, camera_info_, cloud_msg);
+        createPointCloudWithCameraInfo(depth_image, rgb_image, camera_info_, stamp,cloud_msg);
     }
     
     void createPointCloudWithCameraInfo(
         const cv::Mat& depth_image,
         const cv::Mat& rgb_image,
         const sensor_msgs::msg::CameraInfo& cam_info,
+        const rclcpp::Time& stamp,
         sensor_msgs::msg::PointCloud2& cloud_msg)
     {
         const double fx = cam_info.k[0];
@@ -557,10 +582,10 @@ private:
         
         const int height = depth_image.rows;
         const int width = depth_image.cols;
-        const int downsample = 1;  // No downsampling for better quality
+        const int downsample = 4;  // No downsampling for better quality
         
         // Setup PointCloud2 message
-        cloud_msg.header.stamp = this->now();
+        cloud_msg.header.stamp = stamp; 
         cloud_msg.header.frame_id = frame_id_;
         cloud_msg.height = 1;
         cloud_msg.is_dense = false;
@@ -628,109 +653,231 @@ private:
     void timerCallback()
     {
         cv::Mat frame;
-        
-        if (!camera_capture_->read(frame)) {
-            RCLCPP_WARN(this->get_logger(), "Failed to read frame from camera");
+
+        if (!camera_capture_ || !camera_capture_->isOpened() || !camera_capture_->read(frame) || frame.empty()) {
+            consecutive_read_failures_++;
+
+            // Only start recovery after N consecutive failures (avoids reconnecting on a single glitch)
+            if (consecutive_read_failures_ >= camera_failures_before_reconnect_) {
+                camera_ok_ = false;
+                (void)tryRecoverCamera();
+            }
+
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "Camera read failed (%d/%d). waiting/recovering...",
+                consecutive_read_failures_, camera_failures_before_reconnect_);
+
             return;
         }
-        
+
+
         if (frame.empty()) {
             RCLCPP_WARN(this->get_logger(), "Empty frame captured");
             return;
         }
-        
+
+        using steady_clock = std::chrono::steady_clock;
+        const auto t0 = steady_clock::now();
+
+        // Tick counter
+        static uint64_t tick = 0;
+        tick++;
+
+        // Helper: ms elapsed since timepoint
+        auto ms = [&](steady_clock::time_point t_start) -> double {
+            return std::chrono::duration_cast<std::chrono::microseconds>(
+                    steady_clock::now() - t_start)
+                .count() / 1000.0;
+        };
+
+        // One stamp for *all* published messages in this tick
+        static rclcpp::Time last_stamp(0, 0, RCL_ROS_TIME);
+        const rclcpp::Time stamp = this->now();
+        const double dt_stamp_ms =
+            last_stamp.nanoseconds() ? (stamp - last_stamp).seconds() * 1000.0 : 0.0;
+        last_stamp = stamp;
+
+        // Stage timings
+        double undist_ms = 0.0, resize_ms = 0.0, cvt_ms = 0.0;
+        double infer_ms = 0.0, pc_ms = 0.0, pub_ms = 0.0;
+
         // Apply fisheye undistortion if enabled
         cv::Mat frame_processed = frame;
         sensor_msgs::msg::CameraInfo active_camera_info = camera_info_;
-        
-        // Debug: Log undistortion status periodically
+
         static int frame_count = 0;
-        if (frame_count++ % 100 == 0) {
-            RCLCPP_INFO(this->get_logger(), "Undistortion status: enable=%d, undistorter=%s, ready=%s",
+        if ((frame_count++ % 100) == 0) {
+            RCLCPP_INFO(this->get_logger(),
+                        "Undistortion status: enable=%d, undistorter=%s, ready=%s",
                         enable_undistortion_,
                         undistorter_ ? "yes" : "no",
                         (undistorter_ && undistorter_->isReady()) ? "yes" : "no");
         }
-        
+
         if (enable_undistortion_ && undistorter_ && undistorter_->isReady()) {
-            auto undistort_start = std::chrono::high_resolution_clock::now();
+            const auto t_und0 = steady_clock::now();
+
             cv::Mat undistorted;
             if (undistorter_->undistort(frame, undistorted)) {
                 frame_processed = undistorted;
                 active_camera_info = undistorted_camera_info_;
-                
-                auto undistort_end = std::chrono::high_resolution_clock::now();
-                auto undistort_ms = std::chrono::duration_cast<std::chrono::microseconds>(
-                    undistort_end - undistort_start).count() / 1000.0;
-                RCLCPP_DEBUG(this->get_logger(), "Undistortion time: %.2f ms", undistort_ms);
             } else {
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                    "Undistortion failed, using original frame");
+                                    "Undistortion failed, using original frame");
             }
+
+            undist_ms = ms(t_und0);
         }
-        
-        // Downsample if requested (for faster inference)
+
+        // Downsample (for faster inference)
         cv::Mat frame_for_inference = frame_processed;
         sensor_msgs::msg::CameraInfo inference_camera_info = active_camera_info;
-        
+
         if (downsample_factor_ > 1) {
+            const auto t_rs0 = steady_clock::now();
+
             cv::Mat downsampled;
-            cv::resize(frame_processed, downsampled, 
-                      cv::Size(frame_processed.cols / downsample_factor_, 
-                               frame_processed.rows / downsample_factor_),
-                      0, 0, cv::INTER_LINEAR);
+            cv::resize(frame_processed, downsampled,
+                    cv::Size(frame_processed.cols / downsample_factor_,
+                                frame_processed.rows / downsample_factor_),
+                    0, 0, cv::INTER_LINEAR);
+
             frame_for_inference = downsampled;
-            
-            // Update camera info for downsampled resolution
-            // Scale the active camera info (which may be undistorted)
             inference_camera_info = scaleDownCameraInfo(active_camera_info, downsample_factor_);
+
+            resize_ms = ms(t_rs0);
         }
-        
-        auto stamp = this->now();
-        
+
         // Convert to RGB
         cv::Mat frame_rgb;
-        cv::cvtColor(frame_for_inference, frame_rgb, cv::COLOR_BGR2RGB);
-        
-        // Run depth estimation with correct camera info
-        std::vector<cv::Mat> images = {frame_rgb};
-        bool success = depth_estimator_->doInference(images, inference_camera_info, 1, false);
-        
-        if (!success) {
-            RCLCPP_ERROR(this->get_logger(), "Inference failed");
-            return;
+        {
+            const auto t_cvt0 = steady_clock::now();
+            cv::cvtColor(frame_for_inference, frame_rgb, cv::COLOR_BGR2RGB);
+            cvt_ms = ms(t_cvt0);
         }
-        
-        const cv::Mat& depth_image = depth_estimator_->getDepthImage();
-        
-        // Publish input image (use processed frame - undistorted if enabled)
-        auto input_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", frame_for_inference).toImageMsg();
-        input_msg->header.stamp = stamp;
-        input_msg->header.frame_id = frame_id_;
-        image_pub_->publish(*input_msg);
-        
-        // Publish depth image
-        auto depth_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "32FC1", depth_image).toImageMsg();
-        depth_msg->header.stamp = stamp;
-        depth_msg->header.frame_id = frame_id_;
-        depth_pub_->publish(*depth_msg);
-        
-        // Publish colored depth image
-        cv::Mat depth_colored = applyDepthColormap(depth_image);
-        auto depth_colored_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", depth_colored).toImageMsg();
-        depth_colored_msg->header.stamp = stamp;
-        depth_colored_msg->header.frame_id = frame_id_;
-        depth_colored_pub_->publish(*depth_colored_msg);
-        
-        // Publish point cloud with correct camera info (undistorted if enabled)
+
+        // Inference
+        const cv::Mat* depth_image_ptr = nullptr;
+        {
+            std::vector<cv::Mat> images = {frame_rgb};
+            const auto t_inf0 = steady_clock::now();
+            const bool success = depth_estimator_->doInference(images, inference_camera_info, 1, false);
+            infer_ms = ms(t_inf0);
+
+            if (!success) {
+                RCLCPP_ERROR(this->get_logger(), "Inference failed");
+                return;
+            }
+            depth_image_ptr = &depth_estimator_->getDepthImage();
+        }
+
+        const cv::Mat& depth_image = *depth_image_ptr;
+
+        // Build point cloud
         sensor_msgs::msg::PointCloud2 cloud_msg;
-        createPointCloudWithCameraInfo(depth_image, frame_rgb, inference_camera_info, cloud_msg);
-        pointcloud_pub_->publish(cloud_msg);
-        
-        // Publish camera info (use inference camera info for consistency)
-        inference_camera_info.header.stamp = stamp;
-        camera_info_pub_->publish(inference_camera_info);
+        {
+            const auto t_pc0 = steady_clock::now();
+            createPointCloudWithCameraInfo(depth_image, frame_rgb, inference_camera_info, stamp, cloud_msg);
+            pc_ms = ms(t_pc0);
+        }
+
+        // Publish everything
+        {
+            const auto t_pub0 = steady_clock::now();
+
+            auto input_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", frame_for_inference).toImageMsg();
+            input_msg->header.stamp = stamp;
+            input_msg->header.frame_id = frame_id_;
+            image_pub_->publish(*input_msg);
+
+            auto depth_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "32FC1", depth_image).toImageMsg();
+            depth_msg->header.stamp = stamp;
+            depth_msg->header.frame_id = frame_id_;
+            depth_pub_->publish(*depth_msg);
+
+            cv::Mat depth_colored = applyDepthColormap(depth_image);
+            auto depth_colored_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", depth_colored).toImageMsg();
+            depth_colored_msg->header.stamp = stamp;
+            depth_colored_msg->header.frame_id = frame_id_;
+            depth_colored_pub_->publish(*depth_colored_msg);
+
+            pointcloud_pub_->publish(cloud_msg);
+
+            inference_camera_info.header.stamp = stamp;
+            camera_info_pub_->publish(inference_camera_info);
+
+            pub_ms = ms(t_pub0);
+        }
+
+        // Summary print (throttled)
+        if (debug_timing_) {
+            const double total_ms = ms(t0);
+            RCLCPP_INFO_THROTTLE(
+                this->get_logger(), *this->get_clock(), debug_timing_throttle_ms_,
+                "[cam_depth] tick=%lu dt=%.1fms total=%.1fms infer=%.1fms pc=%.1fms pub=%.1fms "
+                "(und=%.1f rs=%.1f cvt=%.1f) points=%u bytes=%zu",
+                tick, dt_stamp_ms, total_ms, infer_ms, pc_ms, pub_ms,
+                undist_ms, resize_ms, cvt_ms,
+                cloud_msg.width, cloud_msg.data.size());
+        }
     }
+
+    bool tryRecoverCamera()
+    {
+        if (!camera_reconnect_enable_) {
+            return false;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (next_reconnect_tp_.time_since_epoch().count() != 0 && now < next_reconnect_tp_) {
+            return false;  // wait for backoff
+        }
+
+        // Increase backoff
+        if (current_backoff_ms_ <= 0) current_backoff_ms_ = camera_reconnect_backoff_ms_;
+        else current_backoff_ms_ = std::min(current_backoff_ms_ * 2, camera_reconnect_max_backoff_ms_);
+
+        next_reconnect_tp_ = now + std::chrono::milliseconds(current_backoff_ms_);
+
+        RCLCPP_WARN(this->get_logger(), "Camera read failing. Reconnecting in %d ms...", current_backoff_ms_);
+
+        // Close old handle
+        try {
+            if (camera_capture_) {
+                if (camera_capture_->isOpened()) {
+                    camera_capture_->release();
+                }
+                camera_capture_.reset();
+            }
+        } catch (...) {
+            // swallow
+        }
+
+        // Re-init
+        if (!initCamera()) {
+            RCLCPP_ERROR(this->get_logger(), "Camera re-init failed (will retry).");
+            camera_ok_ = false;
+            return false;
+        }
+
+        // Re-init undistorter only if enabled (it depends on size + intrinsics)
+        if (enable_undistortion_) {
+            if (!initUndistorter()) {
+                RCLCPP_WARN(this->get_logger(), "Undistorter re-init failed after camera reconnect. Disabling undistortion.");
+                enable_undistortion_ = false;
+            }
+        }
+
+        consecutive_read_failures_ = 0;
+        camera_ok_ = true;
+        current_backoff_ms_ = camera_reconnect_backoff_ms_;  // reset to base after success
+        next_reconnect_tp_ = {};                             // clear
+
+        RCLCPP_INFO(this->get_logger(), "✓ Camera reconnected successfully.");
+        return true;
+    }
+
     
     sensor_msgs::msg::CameraInfo scaleDownCameraInfo(
         const sensor_msgs::msg::CameraInfo& original, int factor)
@@ -791,7 +938,7 @@ private:
     // Camera
     std::unique_ptr<depth_anything_v3::CameraCapture> camera_capture_;
     sensor_msgs::msg::CameraInfo camera_info_;
-    
+
     // Fisheye undistorter
     std::unique_ptr<depth_anything_v3::FisheyeUndistorter> undistorter_;
     sensor_msgs::msg::CameraInfo undistorted_camera_info_;
@@ -806,6 +953,24 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_colored_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_pub_;
     rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_pub_;
+
+    // Debug Time measurement
+    bool debug_timing_{true};
+    int debug_timing_throttle_ms_{1000};
+
+    // Camera reconnect parameters
+    bool camera_reconnect_enable_{true};
+    int camera_reconnect_backoff_ms_{500};
+    int camera_reconnect_max_backoff_ms_{5000};
+    int camera_failures_before_reconnect_{3};
+
+    int consecutive_read_failures_{0};
+    bool camera_ok_{true};
+
+    std::chrono::steady_clock::time_point next_reconnect_tp_{};
+    int current_backoff_ms_{0};
+
+
 };
 
 int main(int argc, char** argv)

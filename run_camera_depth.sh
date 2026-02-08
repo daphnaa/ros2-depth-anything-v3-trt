@@ -16,8 +16,18 @@ pkill -9 -f camera_depth_node 2>/dev/null || true
 pkill -9 -f rviz2 2>/dev/null || true
 sleep 2
 
-# Source
-source install/setup.bash
+# Source workspace install/setup.bash reliably even if script is run from another cwd
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+if [ -f "$WORKSPACE_ROOT/install/setup.bash" ]; then
+    # shellcheck disable=SC1090
+    source "$WORKSPACE_ROOT/install/setup.bash"
+else
+    echo "Warning: workspace install/setup.bash not found at $WORKSPACE_ROOT/install/setup.bash"
+    echo "Falling back to system ROS 2 setup (/opt/ros/humble/setup.bash)"
+    # shellcheck disable=SC1091
+    source /opt/ros/humble/setup.bash
+fi
 
 echo ""
 echo "Configuration:"
@@ -80,9 +90,9 @@ echo ""
 ros2 launch depth_anything_v3 camera_depth_rviz.launch.py \
     camera_type:=standard \
     camera_id:=0 \
-    camera_width:=1920 \
-    camera_height:=1536 \
-    model_path:=onnx/DA3METRIC-LARGE.onnx \
+    camera_width:=640 \
+    camera_height:=480 \
+    model_path:=src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.fp16.engine \
     publish_rate:=10.0 \
     downsample_factor:=2 \
     ${CALIB_PARAMS} \

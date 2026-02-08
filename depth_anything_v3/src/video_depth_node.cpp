@@ -328,6 +328,25 @@ private:
         frame_count_++;
         
         auto stamp = this->now();
+
+        // Debug time stamps
+        static rclcpp::Time prev_stamp(0, 0, RCL_ROS_TIME);
+        static int frame_idx = 0;
+        frame_idx++;
+
+        const auto t_tick_start = this->now();
+
+        RCLCPP_INFO_THROTTLE(
+            this->get_logger(), *this->get_clock(), 1000,
+            "[vid_depth] tick=%d  stamp(sec=%.9f)  dt_stamp=%.3f ms",
+            frame_idx,
+            stamp.seconds(),
+            (prev_stamp.nanoseconds() == 0) ? 0.0 : (stamp - prev_stamp).seconds() * 1000.0
+        );
+
+        prev_stamp = stamp;
+        // END DEBUG PRINT TIME STAMPS
+
         
         // Resize frame if scale factor is not 1.0
         cv::Mat frame_resized;
@@ -351,6 +370,15 @@ private:
         }
         
         const cv::Mat& depth_image = depth_estimator_->getDepthImage();
+
+        // Debug: Log time stamps
+        const auto t_after_infer = this->now();
+        RCLCPP_INFO_THROTTLE(
+            this->get_logger(), *this->get_clock(), 1000,
+            "[vid_depth] infer_done  infer_latency=%.3f ms",
+            (t_after_infer - t_tick_start).seconds() * 1000.0
+        );
+        // Debug: End log time stamps
         
         // Publish input image (use resized frame)
         auto input_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", frame_resized).toImageMsg();
@@ -375,6 +403,18 @@ private:
         sensor_msgs::msg::PointCloud2 cloud_msg;
         createPointCloud(depth_image, frame_rgb, cloud_msg);
         pointcloud_pub_->publish(cloud_msg);
+        // Debug time stamps
+        const auto t_after_cloud = this->now();
+        const double stamp_cloud_ms = (rclcpp::Time(cloud_msg.header.stamp) - stamp).seconds() * 1000.0;
+
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(), *this->get_clock(), 1000,
+            "[vid_depth] cloud_pub  cloud_stamp_minus_frame_stamp=%.3f ms  total_tick=%.3f ms",
+            stamp_cloud_ms,
+            (t_after_cloud - t_tick_start).seconds() * 1000.0
+        );
+        // END DEBUG TIME STAMPS
+
         
         // Publish camera info
         camera_info_.header.stamp = stamp;

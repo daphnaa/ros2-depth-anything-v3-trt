@@ -45,3 +45,5 @@ AMENT_IGNORE
 *.mp4
 *.engine
 *.json
+
+venv_depth/

@@ -18,16 +18,16 @@
 # ============================================================
 
 # Image resolution
-image_width: 1920
-image_height: 1536
+image_width: 640
+image_height: 480
 
 # Camera intrinsic parameters from calibration
 # fx, fy: focal length
 # cx, cy: principal point (optical center)
-fx: 518.9139709663335
-fy: 519.2532832525085
-cx: 983.6364067150027
-cy: 785.5300142273206
+fx: 465.321303
+fy: 466.557484
+cx: 303.131049
+cy: 276.938277
 
 # Distortion model: "fisheye" for OpenCV fisheye model (equidistant)
 # The fisheye model uses 4 coefficients: k1, k2, k3, k4
@@ -36,26 +36,30 @@ distortion_model: "fisheye"
 
 # Fisheye distortion coefficients from calibration
 # D = [-0.115553639350703, 0.007595416258533867, 0.00022984137433380847, 0.0049344122399893765, 0.0]
-k1: -0.115553639350703
-k2: 0.007595416258533867
-k3: 0.00022984137433380847
-k4: 0.0049344122399893765
+# D =  [-0.3222186725870301, 0.10079661819432836, -0.0064427500403842295, 0.00046307332398568343, 0.0]
+k1: -0.3222186725870301
+k2: 0.10079661819432836
+k3: -0.0064427500403842295
+k4: 0.00046307332398568343
 
 # For backward compatibility (p1, p2 mapped to k3, k4)
-p1: 0.00022984137433380847
+p1: -0.0064427500403842295
 p2: 0.0049344122399893765
 
 # Camera matrix (3x3)
 camera_matrix:
   rows: 3
   cols: 3
-  data: [518.9139709663335, 0.0, 983.6364067150027, 0.0, 519.2532832525085, 785.5300142273206, 0.0, 0.0, 1.0]
+  data: [465.321303, 0.000000, 303.131049,
+0.000000, 466.557484, 276.938277,
+0.000000, 0.000000 ,1.000000,
+]
 
 # Distortion coefficients (fisheye model: k1, k2, k3, k4)
 distortion_coefficients:
   rows: 1
   cols: 4
-  data: [-0.115553639350703, 0.007595416258533867, 0.00022984137433380847, 0.0049344122399893765]
+  data: [-0.322219, 0.100797 ,-0.006443 ,0.000463 ,0.000000]
 
 # Rectification matrix (identity for monocular camera)
 rectification_matrix:
@@ -67,4 +71,7 @@ rectification_matrix:
 projection_matrix:
   rows: 3
   cols: 4
-  data: [390.41924642775405, 0.0, 908.7072705364186, 0.0, 0.0, 395.7877890288968, 836.5850357882046, 0.0, 0.0, 0.0, 1.0, 0.0]
+  data: [383.44070179466456, 0.0, 296.7347808749214, 0.0, 0.0, 421.64720784936344, 281.5277228146432, 0.0, 0.0, 0.0, 1.0, 0.0]
+  
+  
+
