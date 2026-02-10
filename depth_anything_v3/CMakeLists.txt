@@ -38,6 +38,10 @@ find_package(OpenCV 4 REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io visualization)
 find_package(yaml-cpp REQUIRED)
 
+# jpg node
+find_package(nlohmann_json REQUIRED)
+
+
 # Find CUDA
 find_package(CUDA REQUIRED)
 enable_language(CUDA)
@@ -267,6 +271,38 @@ ament_target_dependencies(point_cloud_fusion_node
   geometry_msgs
 )
 
+# jpg node executable
+add_executable(jpg_depth_node
+  src/jpg_depth_node.cpp
+  src/tensorrt_depth_anything/tensorrt_depth_anything.cpp
+  src/tensorrt_common/tensorrt_common.cpp
+  src/tensorrt_common/simple_profiler.cpp
+)
+
+target_include_directories(jpg_depth_node PRIVATE
+  include
+  ${OpenCV_INCLUDE_DIRS}
+  ${CUDA_INCLUDE_DIRS}
+  ${TENSORRT_INCLUDE_DIR}
+)
+
+target_link_libraries(jpg_depth_node
+  ${TENSORRT_LIBRARY}
+  ${CUDA_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${CUDA_CUBLAS_LIBRARIES}
+  ${CUDA_curand_LIBRARY}
+  ${CUDA_cusparse_LIBRARY}
+  yaml-cpp
+  nlohmann_json::nlohmann_json
+)
+
+ament_target_dependencies(jpg_depth_node
+  rclcpp
+  sensor_msgs
+  cv_bridge
+)
+
 # Install targets
 install(TARGETS
   tensorrt_depth_anything
@@ -277,6 +313,7 @@ install(TARGETS
   camera_depth_node
   video_depth_node
   point_cloud_fusion_node
+  jpg_depth_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
