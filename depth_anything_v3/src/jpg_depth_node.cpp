@@ -146,6 +146,42 @@ static sensor_msgs::msg::Image matToImageMsg(
     return msg;
 }
 
+// ---------------- Wall bbox calc helper ----------------
+static std::array<std::pair<std::string, cv::Rect>, 3> makeWallRois(
+    int W, int H,
+    double box_w_frac,
+    double box_h_frac,
+    double y_in_top_frac,
+    double x_margin_frac)
+{
+    const int top_h = std::max(1, H / 3);
+
+    const int bw = std::max(10, int(std::round(W * box_w_frac)));
+    const int bh = std::max(10, int(std::round(top_h * box_h_frac)));
+
+    const int y_center = int(std::round(y_in_top_frac * top_h));
+    const int y1 = std::max(0, y_center - bh / 2);
+    const int y2 = std::min(top_h - 1, y_center + bh / 2);
+
+    const int margin = int(std::round(x_margin_frac * W));
+
+    const int x_left_c   = margin + bw / 2;
+    const int x_mid_c    = W / 2;
+    const int x_right_c  = W - margin - bw / 2;
+
+    auto mk = [&](int xc) -> cv::Rect {
+        int x1 = std::max(0, xc - bw / 2);
+        int x2 = std::min(W - 1, xc + bw / 2);
+        return clampRoi(x1, y1, x2, y2, W, H);
+    };
+
+    return {{
+        {"left",   mk(x_left_c)},
+        {"middle", mk(x_mid_c)},
+        {"right",  mk(x_right_c)},
+    }};
+}
+
 
 // ---------------- PointCloud (same style as video node) ----------------
 static void createPointCloudRgb(
@@ -243,6 +279,13 @@ public:
         min_score_ = get_parameter("min_score").as_double();
         hist_bins_ = get_parameter("hist_bins").as_int();
         hist_min_frac_ = get_parameter("hist_min_frac").as_double();
+
+        // wall calculator parameters
+        declare_parameter<double>("wall_box_w_frac", 0.22);     // box width as fraction of image width
+        declare_parameter<double>("wall_box_h_frac", 0.55);     // box height as fraction of top-third height
+        declare_parameter<double>("wall_y_in_top_frac", 0.35);  // center y inside top third (0..1)
+        declare_parameter<double>("wall_x_margin_frac", 0.08);  // margin from sides (fraction of width)
+
 
         if (jpg_dir_.empty()) throw std::runtime_error("jpg_dir is required");
         if (output_dir_.empty()) throw std::runtime_error("output_dir is required");
@@ -362,6 +405,8 @@ private:
         // Publish pointcloud (RGB)
         sensor_msgs::msg::PointCloud2 cloud_msg;
         createPointCloudRgb(depth32f, rgb, camera_info_, stamp, frame_id_, cloud_msg);
+        // Log Publish event with timestamp
+        RCLCPP_INFO(get_logger(), "Publishing point cloud for: %s  points=%u", jpg_path.c_str(), cloud_msg.width);
         pointcloud_pub_->publish(cloud_msg);
 
         // Load detections JSON (same basename)
@@ -441,6 +486,50 @@ private:
                 }
             }
         }
+        // --- Wall estimation (3 ROIs in top third) ---
+        const double wall_box_w_frac    = get_parameter("wall_box_w_frac").as_double();
+        const double wall_box_h_frac    = get_parameter("wall_box_h_frac").as_double();
+        const double wall_y_in_top_frac = get_parameter("wall_y_in_top_frac").as_double();
+        const double wall_x_margin_frac = get_parameter("wall_x_margin_frac").as_double();
+
+        json wall = json::object();
+
+        auto wall_rois = makeWallRois(
+            depth32f.cols, depth32f.rows,
+            wall_box_w_frac, wall_box_h_frac,
+            wall_y_in_top_frac, wall_x_margin_frac);
+
+        for (const auto& kv : wall_rois) {
+            const std::string& name = kv.first;
+            const cv::Rect& roi = kv.second;
+
+            json w = json::object();
+            w["bbox"] = {roi.x, roi.y, roi.x + roi.width, roi.y + roi.height};
+
+            double Z = std::numeric_limits<double>::quiet_NaN();
+            if (roi.width > 0 && roi.height > 0 &&
+                depthHistModeInRoi(depth32f, roi, min_depth_, max_depth_, hist_bins_, hist_min_frac_, Z))
+            {
+                const double u = roi.x + 0.5 * roi.width;
+                const double v = roi.y + 0.5 * roi.height;
+
+                const double fx = camera_info_.k[0];
+                const double fy = camera_info_.k[4];
+                const double cx = camera_info_.k[2];
+                const double cy = camera_info_.k[5];
+
+                const double X = (u - cx) * Z / fx;
+                const double Y = (v - cy) * Z / fy;
+
+                w["depth_m"] = Z;
+                w["xyz_m"] = {X, Y, Z};
+                w["valid"] = true;
+            } else {
+                w["valid"] = false;
+            }
+
+            wall[name] = w;
+        }
 
         // Write output JSON for client
         json out;
@@ -453,6 +542,8 @@ private:
             {"cx", camera_info_.k[2]}, {"cy", camera_info_.k[5]}
         };
         out["objects"] = objs;
+        out["wall"] = wall;
+
 
         fs::path out_path = fs::path(output_dir_) / (stem.string() + ".objects.json");
         std::ofstream of(out_path.string());

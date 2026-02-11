@@ -1,0 +1,85 @@
+# mono pinhole calibration...
+# D = [-0.36615240377653474, 0.09636427402700218, -0.013826954005718312, 0.009772635476396401, 0.0]
+# K = [2420.274870670148, 0.0, 1875.708880091908, 0.0, 2403.907749464866, 1205.4404282828557, 0.0, 0.0, 1.0]
+# R = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+# P = [1655.2640527984272, 0.0, 1997.4549432593785, 0.0, 0.0, 2212.7880709423666, 1201.9979728420599, 0.0, 0.0, 0.0, 1.0, 0.0]
+# None
+# # oST version 5.0 parameters
+
+
+# Camera intrinsic parameters configuration file (YAML format)
+# For 1920x1536 resolution fisheye camera
+#
+# Calibrated using ROS2 camera_calibration with fisheye mode:
+#   ros2 run camera_calibration cameracalibrator \
+#     --size 8x6 --square 0.025 \
+#     --fisheye-recompute-extrinsicsts --fisheye-fix-skew \
+#     --ros-args --remap image:=/image_raw --remap camera:=/v4l2_camera
+#
+# ============================================================
+# FISHEYE UNDISTORTION (鱼眼畸变矫正)
+# ============================================================
+# To enable fisheye undistortion, use:
+#   ENABLE_UNDISTORTION=1 CAMERA_INFO_FILE=camera_info_example.yaml ./run_camera_depth.sh
+#
+# Or with balance parameter (0.0=crop to valid pixels, 1.0=full FOV):
+#   ENABLE_UNDISTORTION=1 UNDISTORTION_BALANCE=0.5 CAMERA_INFO_FILE=camera_info_example.yaml ./run_camera_depth.sh
+# ============================================================
+
+# Image resolution
+image_width: 3840
+image_height: 2160
+
+# Camera intrinsic parameters from calibration
+# fx, fy: focal length
+# cx, cy: principal point (optical center)
+fx: 2420.274871
+fy: 2403.907749
+cx: 1875.708880
+cy: 1205.440428
+
+# Distortion model: "fisheye" for OpenCV fisheye model (equidistant)
+# The fisheye model uses 4 coefficients: k1, k2, k3, k4
+# Note: ROS calibration outputs 5 values, but fisheye only uses first 4
+distortion_model: "plumb_bob"   # typical pinhole calibration
+
+# Fisheye distortion coefficients from calibration
+# D = [-0.115553639350703, 0.007595416258533867, 0.00022984137433380847, 0.0049344122399893765, 0.0]
+# D =  [-0.3222186725870301, 0.10079661819432836, -0.0064427500403842295, 0.00046307332398568343, 0.0]
+k1: -0.36615240377653474
+k2: 0.09636427402700218
+k3: -0.013826954005718312
+k4: 0.009772635476396401
+
+# For backward compatibility (p1, p2 mapped to k3, k4)
+p1: -0.0064427500403842295
+p2: 0.0049344122399893765
+
+# Camera matrix (3x3)
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [2420.274871, 0.0, 1875.708880,
+         0.0, 2403.907749, 1205.440428,
+         0.0, 0.0, 1.0]
+
+# Distortion coefficients (fisheye model: k1, k2, k3, k4)
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [-0.3661524038, 0.0963642740, -0.0138269540, 0.0097726355, 0.0]
+
+# Rectification matrix (identity for monocular camera)
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+
+# Projection matrix (3x4) from calibration
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [1655.264053, 0.0, 1997.454943, 0.0, 0.0, 2212.788071, 1201.997973, 0.0, 0.0, 0.0, 1.0, 0.0]
+  
+  
+

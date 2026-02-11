@@ -176,3 +176,52 @@ ros2 run depth_anything_v3 jpg_depth_node --ros-args \
   -p frame_id:=camera_optical_frame
 
 ```
+
+
+## Build (colcon)
+From your workspace root:
+```bash
+cd ~/depth_anything_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-select depth_anything_v3 --cmake-args -DCMAKE_BUILD_TYPE=Release
+source install/setup.bash
+```
+
+## HTTP service (bbox + depth)
+This binary runs an HTTP server with a `/bbox_depth` endpoint that accepts:
+- multipart form file `image` (JPEG/PNG)
+- optional multipart form file `detections` (JSON)
+- optional multipart form field `image_dir` (directory path used for saving colormap images)
+
+### Run the HTTP server
+```bash
+ros2 run depth_anything_v3 depth_anything_http_server \
+  --model /home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.onnx \
+  --camera-yaml /home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/camera_info_4k.yaml \
+  --host 0.0.0.0 --port 5070 \
+  --save-depth 1 \
+  --save-every 1 \
+  --save-max-depth 10.0
+```
+
+Notes:
+- Saving happens **per request** (not per second). `--save-every N` saves every N-th request.
+- The save directory is derived from the request's `image_dir`:
+  if `image_dir=/a/b/c` then depth images go under `/a/b/c_depth/`.
+
+### Python request example (with saving)
+When sending `files=...` in `requests`, also send `image_dir` as a multipart field:
+
+```python
+from pathlib import Path
+import os, json, requests
+
+with open(current_img_path, "rb") as f_img:
+    files = {
+        "image": (os.path.basename(current_img_path), f_img, "image/jpeg"),
+        "detections": ("detections.json", json.dumps(body), "application/json"),
+        # IMPORTANT: send image_dir as multipart form field
+        "image_dir": (None, str(Path(current_img_path).parent)),
+    }
+    r_depth = requests.post(depth_endpoint, files=files, timeout=30)
+```

@@ -41,6 +41,11 @@ find_package(yaml-cpp REQUIRED)
 # jpg node
 find_package(nlohmann_json REQUIRED)
 
+# http 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(CPPHTTPLIB REQUIRED cpp-httplib)
+
+
 
 # Find CUDA
 find_package(CUDA REQUIRED)
@@ -115,6 +120,54 @@ ament_target_dependencies(depth_anything_v3_node
   cv_bridge
   message_filters
 )
+
+# ---------------- Shared helpers ----------------
+add_library(depth_anything_helpers
+  src/depth_helpers.cpp
+)
+
+target_include_directories(depth_anything_helpers PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+ament_target_dependencies(depth_anything_helpers
+  sensor_msgs
+)
+
+target_link_libraries(depth_anything_helpers
+  yaml-cpp
+  ${OpenCV_LIBRARIES}
+)
+
+# ---------------- HTTP server ----------------
+add_executable(depth_anything_http_server
+  src/depth_anything_http_server.cpp
+)
+
+target_include_directories(depth_anything_http_server PRIVATE
+  include
+  ${OpenCV_INCLUDE_DIRS}
+  ${CPPHTTPLIB_INCLUDE_DIRS}
+)
+
+ament_target_dependencies(depth_anything_http_server
+  sensor_msgs
+)
+
+target_link_libraries(depth_anything_http_server
+  tensorrt_depth_anything
+  depth_anything_helpers
+  ${CPPHTTPLIB_LIBRARIES}
+  ${TENSORRT_LIBRARY}
+  ${CUDA_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${CUDA_CUBLAS_LIBRARIES}
+  ${CUDA_curand_LIBRARY}
+  ${CUDA_cusparse_LIBRARY}
+  yaml-cpp
+)
+
 
 # Register component
 rclcpp_components_register_nodes(depth_anything_v3_node "depth_anything_v3::DepthAnythingV3Node")
@@ -217,6 +270,8 @@ target_link_libraries(camera_depth_node
   ${CUDA_cusparse_LIBRARY}
   yaml-cpp
 )
+target_link_libraries(camera_depth_node depth_anything_helpers)
+
 
 ament_target_dependencies(camera_depth_node
   rclcpp
@@ -247,6 +302,9 @@ target_link_libraries(video_depth_node
   ${CUDA_curand_LIBRARY}
   ${CUDA_cusparse_LIBRARY}
 )
+
+target_link_libraries(video_depth_node depth_anything_helpers)
+
 
 ament_target_dependencies(video_depth_node
   rclcpp
@@ -297,6 +355,9 @@ target_link_libraries(jpg_depth_node
   nlohmann_json::nlohmann_json
 )
 
+target_link_libraries(jpg_depth_node depth_anything_helpers)
+
+
 ament_target_dependencies(jpg_depth_node
   rclcpp
   sensor_msgs
@@ -305,19 +366,23 @@ ament_target_dependencies(jpg_depth_node
 
 # Install targets
 install(TARGETS
+  depth_anything_helpers
   tensorrt_depth_anything
   depth_anything_v3_node
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+)
+install(TARGETS
   depth_anything_v3_main
   generate_engines
-  # standalone_demo  # Commented out - file does not exist
   camera_depth_node
   video_depth_node
   point_cloud_fusion_node
   jpg_depth_node
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
+  depth_anything_http_server
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
+
 
 install(DIRECTORY include/
   DESTINATION include/
