@@ -2,9 +2,10 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <std_msgs/msg/header.hpp>
+
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
-#include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/opencv.hpp>
 #include <yaml-cpp/yaml.h>
 
@@ -13,6 +14,8 @@
 #include <algorithm>
 #include <limits>
 #include <chrono>
+#include <cstring>   // memcpy
+
 
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
@@ -117,6 +120,32 @@ static bool depthHistModeInRoi(
     out_z = min_d + (best_b + 0.5) * bin_w;
     return true;
 }
+
+// ---------------- matToImageMsg helper ----------------
+static sensor_msgs::msg::Image matToImageMsg(
+    const cv::Mat& mat,
+    const std::string& encoding,
+    const rclcpp::Time& stamp,
+    const std::string& frame_id)
+{
+    // Ensure we publish contiguous data
+    cv::Mat contig = mat.isContinuous() ? mat : mat.clone();
+
+    sensor_msgs::msg::Image msg;
+    msg.header.stamp = stamp;
+    msg.header.frame_id = frame_id;
+    msg.height = contig.rows;
+    msg.width = contig.cols;
+    msg.encoding = encoding;
+    msg.is_bigendian = false;
+    msg.step = static_cast<sensor_msgs::msg::Image::_step_type>(contig.step);
+
+    const size_t bytes = static_cast<size_t>(msg.step) * static_cast<size_t>(msg.height);
+    msg.data.resize(bytes);
+    std::memcpy(msg.data.data(), contig.data, bytes);
+    return msg;
+}
+
 
 // ---------------- PointCloud (same style as video node) ----------------
 static void createPointCloudRgb(
@@ -326,10 +355,9 @@ private:
         const auto stamp = now();
 
         // Publish depth
-        auto depth_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "32FC1", depth32f).toImageMsg();
-        depth_msg->header.stamp = stamp;
-        depth_msg->header.frame_id = frame_id_;
-        depth_pub_->publish(*depth_msg);
+        auto depth_msg = matToImageMsg(depth32f, "32FC1", stamp, frame_id_);
+        depth_pub_->publish(depth_msg);
+
 
         // Publish pointcloud (RGB)
         sensor_msgs::msg::PointCloud2 cloud_msg;
