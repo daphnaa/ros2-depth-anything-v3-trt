@@ -222,12 +222,16 @@ struct DepthService {
         json xyz = projectUvDepthToXyz(u, v, Z, camInfo);
         o["depth_m"] = xyz["depth_m"];
         o["xyz_m"]   = xyz["xyz_m"];
+        // max depth at column of an object 
+        double maxCol = std::numeric_limits<double>::quiet_NaN();
+        if (maxDepthInColumns(depth32f, x1, x2, minDepth, maxDepth, maxCol)) {
+            o["max_depth_col_m"] = maxCol;
+        }
+
         out["objects"].push_back(o);
     }
     }
 
-    // wall probes
-    out["wall"] = computeWallProbesTopThird(depth32f, camInfo, minDepth, maxDepth, histBins, histMinFrac);
     // jpg path
     if (!saved_path.empty()) {
       out["depth_colorm_jpg"] = saved_path;

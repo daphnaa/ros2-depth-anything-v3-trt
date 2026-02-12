@@ -178,6 +178,8 @@ json projectUvDepthToXyz(double u, double v, double z, const sensor_msgs::msg::C
 
     const double X = (u - cx) * z / fx;
     const double Y = (v - cy) * z / fy;
+
+    
     return json{{"xyz_m", {X, Y, z}}, {"depth_m", z}};
 }
 
@@ -295,6 +297,39 @@ void saveDepthColormap(const cv::Mat& depth32f_m,
     cv::imwrite(out_path_jpg, depth_color);
     }
 
+    bool maxDepthInColumns(
+    const cv::Mat& depth32f,
+    int x1, int x2,
+    double min_d, double max_d,
+    double& out_max_depth)
+    {
+        if (depth32f.empty() || depth32f.type() != CV_32FC1) return false;
+
+        const int W = depth32f.cols;
+        const int H = depth32f.rows;
+
+        x1 = std::max(0, std::min(x1, W - 1));
+        x2 = std::max(0, std::min(x2, W - 1));
+        if (x2 < x1) std::swap(x1, x2);
+
+        double best = -1.0;
+        int count = 0;
+
+        for (int y = 0; y < H; ++y) {
+            const float* row = depth32f.ptr<float>(y);
+            for (int x = x1; x <= x2; ++x) {
+                const float d = row[x];
+                if (!std::isfinite(d)) continue;
+                if (d < (float)min_d || d > (float)max_d) continue;
+                if (d > best) best = d;
+                count++;
+            }
+        }
+
+        if (count < 30 || best <= 0.0) return false;
+        out_max_depth = best;
+        return true;
+    }
 
 
 

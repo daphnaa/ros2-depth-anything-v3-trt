@@ -50,6 +50,14 @@ void saveDepthColormap(const cv::Mat& depth32f_m,
                        float vmin = -1.0f,
                        float vmax = -1.0f);
 
+
+bool maxDepthInColumns(
+    const cv::Mat& depth32f,
+    int x1, int x2,
+    double min_d, double max_d,
+    double& out_max_depth);
+
+
 std::string dirnameOf(const std::string& p);
 std::string addDepthSuffix(const std::string& dir);
 void ensureDir(const std::string& d);
