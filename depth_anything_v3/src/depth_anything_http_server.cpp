@@ -63,7 +63,13 @@ static void printUsage(const char* prog) {
     << "  --hist-min-frac <0.06>    (default 0.06)\n"
     << "  --save-depth <dir>        save depth colormap images under <image_dir>_depth (default: disabled)\n"
     << "  --save-every <N>          save every N-th request (default 1)\n"
-    << "  --save-max-depth <m>      colormap clamp max depth (default = --max-depth)\n";
+    << "  --save-max-depth <m>      colormap clamp max depth (default = --max-depth)\n"
+    << "  --tiling <0|1>            enable tiling blend (default 1)\n"
+    << "  --tile-w <960>            tile width (default 960)\n"
+    << "  --tile-h <768>            tile height (default 768)\n"
+    << "  --tile-overlap-div <10>   overlap ~ tile/overlap_div (default 10)\n";
+
+
 }
 
 
@@ -85,6 +91,12 @@ struct DepthService {
   double saveMaxDepth{10.0};
   uint64_t reqCount{0};
 
+  depth_anything_helpers::TileCfg tileCfg;
+  cv::Mat tileWeights;
+  int tileFadePx{32};
+  bool useTiling{true};
+
+
   bool init(const std::string& model_path,
           const std::string& camera_yaml,
           const std::string& precision,
@@ -92,16 +104,23 @@ struct DepthService {
           int hist_bins, double hist_min_frac,
           const std::string& save_dir,
           int save_every,
-          double save_max_depth)
-        {
-          minDepth = min_depth;
-          maxDepth = max_depth;
-          histBins = hist_bins;
-          histMinFrac = hist_min_frac;
+          double save_max_depth,
+          bool use_tiling,
+          int tile_w,
+          int tile_h,
+          int tile_overlap_div)
+          {
+            minDepth = min_depth;
+            maxDepth = max_depth;
+            histBins = hist_bins;
+            histMinFrac = hist_min_frac;
 
-          saveDepthDir = save_dir;
-          saveEvery = std::max(1, save_every);
-          saveMaxDepth = save_max_depth;
+            saveDepthDir = save_dir;
+            saveEvery = std::max(1, save_every);
+            saveMaxDepth = save_max_depth;
+
+            useTiling = use_tiling;
+
             if (!loadIntrinsicsFromYaml(camera_yaml, W, H, fx, fy, cx, cy)) return false;
             camInfo = makeCameraInfoFromIntrinsics(W, H, fx, fy, cx, cy, "camera_link");
 
@@ -110,16 +129,44 @@ struct DepthService {
             build_config.calib_type_str = "MinMax";
 
             da = std::make_unique<depth_anything_v3::TensorRTDepthAnything>(
-              model_path,
-              precision,
-              build_config,
-              false, "", tensorrt_common::BatchConfig{1,1,1},
-              (1ULL << 30)
-            );
-            da->initPreprocessBuffer(W, H);
+                model_path,
+                precision,
+                build_config,
+                false, "", tensorrt_common::BatchConfig{1,1,1},
+                (1ULL << 30));
+
             da->setSkyThreshold(0.3f);
+
+            // Configure tiling
+            // 1. Configure core tiling dimensions
+            tileCfg.tile_w = std::max(512, tile_w);
+            tileCfg.tile_h = std::max(512, tile_h);
+            tileCfg.overlap_div = std::max(2, tile_overlap_div);
+
+            // 2. ONLY calculate default if user hasn't specified a value (e.g., it's 0 or -1)
+            if (tileFadePx <= 0) {
+                // Default to half of the smallest overlap
+                tileFadePx = std::min(tileCfg.overlap_x(), tileCfg.overlap_y()) / 2;
+            }
+
+            // 3. Force a minimum for 4K to ensure smooth gradients
+            tileFadePx = std::max(256, tileFadePx); 
+
+            // 4. Safety: Ensure it doesn't exceed the actual overlap
+            tileFadePx = std::min({tileFadePx, (int)(tileCfg.overlap_x() * 0.9f), (int)(tileCfg.overlap_y() * 0.9f)});
+            std::cerr << "[CFG] tiling=1 fade_px=" << tileFadePx << "\n";
+
+
+            if (useTiling) {
+              tileWeights = depth_anything_helpers::blendWeights(tileCfg.tile_h, tileCfg.tile_w, tileFadePx);
+              da->initPreprocessBuffer(tileCfg.tile_w, tileCfg.tile_h);   // for tile inference
+            } else {
+              da->initPreprocessBuffer(W, H);                             // for full-frame inference
+            }
+
             return true;
           }
+
 
   json infer(const cv::Mat& bgr,
            const json* detections_or_null,
@@ -133,11 +180,48 @@ struct DepthService {
     cv::Mat rgb;
     cv::cvtColor(bgr_resized, rgb, cv::COLOR_BGR2RGB);
 
-    std::vector<cv::Mat> images = { rgb };
-    if (!da->doInference(images, camInfo, 1, false)) {
-      return json{{"ok", false}, {"error", "doInference failed"}};
+    cv::Mat depth32f;
+
+    if (useTiling) {  
+      // 1) Baseline full-frame depth (optional but you asked for it)
+      cv::Mat depth_base;
+      {
+        // If your engine expects 518x518 input internally, it can still accept any WxH camera model,
+        // but preprocess buffer must match. Since we initialized preprocess for tiles, we must temporarily
+        // re-init to full size OR you skip baseline.
+
+
+        da->initPreprocessBuffer(W, H);
+
+        std::vector<cv::Mat> images = { rgb };
+        if (!da->doInference(images, camInfo, 1, false)) {
+          return json{{"ok", false}, {"error", "doInference failed (base)"}};
+        }
+        depth_base = da->getDepthImage().clone();
+      }
+
+      // 2) Tiled blended depth (improved)
+      {
+        da->initPreprocessBuffer(tileCfg.tile_w, tileCfg.tile_h);
+        depth32f = depth_anything_helpers::inferDepthTiled(*da, rgb, camInfo, tileCfg, tileWeights, tileFadePx);
+
+        std::cerr << "[DBG] depth32f size=" << depth32f.cols << "x" << depth32f.rows << "\n";
+
+      }
+
+      // If you want: keep base for debugging
+      // (optional) out["depth_base_stats"] etc.
+
+    } else {
+      std::vector<cv::Mat> images = { rgb };
+      if (!da->doInference(images, camInfo, 1, false)) {
+        return json{{"ok", false}, {"error", "doInference failed"}};
+      }
+      depth32f = da->getDepthImage().clone();
     }
-    const cv::Mat& depth32f = da->getDepthImage(); // CV_32FC1 meters
+
+
+
 
     double mn, mx;
     cv::minMaxLoc(depth32f, &mn, &mx);
@@ -163,7 +247,7 @@ struct DepthService {
       const std::string base = std::filesystem::path(image_name).stem().string();
       saved_path = out_dir + "/" + base + "_depth.jpg";
 
-      saveDepthColormap(depth32f, saved_path, -1.0f, -1.0f);
+      saveDepthColormap(depth32f, saved_path, 0.2f, 3.0f);
       std::cerr << "[SAVE] " << saved_path << "\n";
     } else {
       std::cerr << "[NOT SAVED] enabled=" << enabled
@@ -240,6 +324,7 @@ struct DepthService {
     return out;
 
   }
+
 };
 
 int main(int argc, char** argv) {
@@ -257,6 +342,14 @@ int main(int argc, char** argv) {
   const std::string camera_yaml = getStr(args, "--camera-yaml", "");
   const std::string precision   = getStr(args, "--precision", "fp16");
 
+  const bool use_tiling = (getInt(args, "--tiling", 1) != 0);
+
+  const int tile_w = getInt(args, "--tile-w", 960);
+  const int tile_h = getInt(args, "--tile-h", 768);
+  const int tile_overlap_div = getInt(args, "--tile-overlap-div", 10);
+
+
+
   if (model_path.empty() || camera_yaml.empty()) {
     printUsage(argv[0]);
     std::cerr << "\nMissing required: --model and/or --camera-yaml\n";
@@ -272,12 +365,13 @@ int main(int argc, char** argv) {
   const std::string save_dir = getStr(args, "--save-depth", "");
   const int save_every       = getInt(args, "--save-every", 1);
   const double save_max_d    = getDbl(args, "--save-max-depth", max_depth);
-
+  
 
   DepthService svc;
   if (!svc.init(model_path, camera_yaml, precision,
               min_depth, max_depth, hist_bins, hist_min_frac,
-              save_dir, save_every, save_max_d))  {
+              save_dir, save_every, save_max_d,
+              use_tiling, tile_w, tile_h, tile_overlap_div)) {
     std::cerr << "Failed init. model=" << model_path << " yaml=" << camera_yaml << "\n";
     return 1;
   }

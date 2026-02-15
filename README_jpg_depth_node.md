@@ -203,6 +203,9 @@ ros2 run depth_anything_v3 depth_anything_http_server \
   --save-every 1 \
   --save-max-depth 10.0
 ```
+```bash 
+ ros2 run depth_anything_v3 depth_anything_http_server   --model /home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-batch1.engine   --camera-yaml /home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/camera_info_4k.yaml   --max-depth 3.0 --host 0.0.0.0 --port 5070 --save-depth --tiling 1 --tile-overlap-div 2 --tile-fade-px 400
+```
 
 Notes:
 - Saving happens **per request** (not per second). `--save-every N` saves every N-th request.

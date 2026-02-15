@@ -5,8 +5,8 @@ import requests
 
 URL = "http://127.0.0.1:5070/bbox_depth"
 
-img_path = "/home/daphnaa/Pictures/ExpoTLV/living_room/20260212_173804220_iOS_4K_Wide.jpg"
-js_path  = "/home/daphnaa/Pictures/ExpoTLV/living_room/20260212_173804220_iOS_4K_Wide.json"
+img_path = "/home/daphnaa/Pictures/ExpoTLV/living_room/20260212_175324997_iOS_4K_Wide.jpg"
+js_path  = "/home/daphnaa/Pictures/ExpoTLV/living_room/20260212_175324997_iOS_4K_Wide.json"
 
 with open(js_path, "r") as f:
     j = json.load(f)

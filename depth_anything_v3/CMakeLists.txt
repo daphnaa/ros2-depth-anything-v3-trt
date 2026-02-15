@@ -132,8 +132,10 @@ target_include_directories(depth_anything_helpers PUBLIC
 )
 
 ament_target_dependencies(depth_anything_helpers
+  rclcpp
   sensor_msgs
 )
+
 
 target_link_libraries(depth_anything_helpers
   yaml-cpp
@@ -143,6 +145,7 @@ target_link_libraries(depth_anything_helpers
 # ---------------- HTTP server ----------------
 add_executable(depth_anything_http_server
   src/depth_anything_http_server.cpp
+  src/depth_helpers.cpp
 )
 
 target_include_directories(depth_anything_http_server PRIVATE

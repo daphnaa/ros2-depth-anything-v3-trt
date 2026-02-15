@@ -48,3 +48,4 @@ da3_env/
 *.json
 
 venv_depth/
+.idea/

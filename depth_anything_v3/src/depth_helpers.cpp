@@ -1,8 +1,10 @@
 #include "depth_anything_v3/depth_helpers.hpp"
+#include "depth_anything_v3/tensorrt_depth_anything.hpp"   
 #include <yaml-cpp/yaml.h>
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+
 
 namespace depth_anything_helpers {
 
@@ -170,131 +172,48 @@ json parseDetectionsFromNanoowlLikeJson(const json& det_or_sidecar)
 }
 
 json projectUvDepthToXyz(double u, double v, double z, const sensor_msgs::msg::CameraInfo& cam)
-{
-    const double fx = cam.k[0];
-    const double fy = cam.k[4];
-    const double cx = cam.k[2];
-    const double cy = cam.k[5];
-
-    const double X = (u - cx) * z / fx;
-    const double Y = (v - cy) * z / fy;
-
-    
-    return json{{"xyz_m", {X, Y, z}}, {"depth_m", z}};
-}
-
-json computeWallProbesTopThird(
-    const cv::Mat& depth32f,
-    const sensor_msgs::msg::CameraInfo& cam,
-    double min_depth, double max_depth,
-    int hist_bins, double hist_min_frac)
-{
-    const int W = depth32f.cols;
-    const int H = depth32f.rows;
-
-    // Top third, small-ish boxes
-    const int y_center = int(std::round(H * 0.18));             // in top third
-    const int box_w = std::max(20, int(std::round(W * 0.12)));
-    const int box_h = std::max(20, int(std::round(H * 0.12)));
-
-    auto make_probe = [&](double x_frac) -> json {
-        const int x_center = int(std::round(W * x_frac));
-        const int x1 = x_center - box_w / 2;
-        const int x2 = x_center + box_w / 2;
-        const int y1 = y_center - box_h / 2;
-        const int y2 = y_center + box_h / 2;
-
-        cv::Rect roi = clampRoi(x1, y1, x2, y2, W, H);
-        if (roi.width <= 0 || roi.height <= 0) return json::object();
-
-        double Z = std::numeric_limits<double>::quiet_NaN();
-        if (!depthHistModeInRoi(depth32f, roi, min_depth, max_depth, hist_bins, hist_min_frac, Z)) {
-            return json::object();
-        }
-
-        const double u = roi.x + 0.5 * roi.width;
-        const double v = roi.y + 0.5 * roi.height;
-
-        json p = projectUvDepthToXyz(u, v, Z, cam);
-        p["bbox"] = {roi.x, roi.y, roi.x + roi.width, roi.y + roi.height};
-        return p;
-    };
-
-    return json{
-        {"left",   make_probe(1.0/6.0)},
-        {"middle", make_probe(3.0/6.0)},
-        {"right",  make_probe(5.0/6.0)}
-    };
-}
-
-
-void saveDepthColormap(const cv::Mat& depth32f_m,
-                    const std::string& out_path_jpg,
-                    float vmin,
-                    float vmax)
     {
-    CV_Assert(depth32f_m.type() == CV_32FC1);
+        const double fx = cam.k[0];
+        const double fy = cam.k[4];
+        const double cx = cam.k[2];
+        const double cy = cam.k[5];
 
-    // Auto range (robust percentiles) if vmin/vmax not provided
-    if (vmin < 0.0f || vmax < 0.0f) {
-        std::vector<float> v;
-        v.reserve(depth32f_m.total());
+        const double X = (u - cx) * z / fx;
+        const double Y = (v - cy) * z / fy;
 
-        for (int y = 0; y < depth32f_m.rows; ++y) {
-        const float* row = depth32f_m.ptr<float>(y);
-        for (int x = 0; x < depth32f_m.cols; ++x) {
-            float d = row[x];
-            if (std::isfinite(d) && d > 0.0f) v.push_back(d);
-        }
-        }
-        if (v.size() < 100) return;
-
-        std::sort(v.begin(), v.end());
-        auto pct = [&](double p) -> float {
-        size_t i = (size_t)std::round(p * (v.size() - 1));
-        if (i >= v.size()) i = v.size() - 1;
-        return v[i];
-        };
-
-        vmin = pct(0.02);
-        vmax = pct(0.98);
-        if (!(vmax > vmin)) { vmin = v.front(); vmax = v.back(); }
+        
+        return json{{"xyz_m", {X, Y, z}}, {"depth_m", z}};
     }
 
-    cv::Mat clipped = depth32f_m.clone();
+void saveDepthColormap(const cv::Mat& depth32f_m, const std::string& out_path_jpg, float vmin, float vmax) {
+        if (depth32f_m.empty()) return;
 
-    // Replace non-finite / <=0 with NaN-ish marker (we'll paint black later)
-    for (int y = 0; y < clipped.rows; ++y) {
-        float* row = clipped.ptr<float>(y);
-        for (int x = 0; x < clipped.cols; ++x) {
-        float d = row[x];
-        if (!std::isfinite(d) || d <= 0.0f) row[x] = std::numeric_limits<float>::quiet_NaN();
-        }
-    }
+        // 1. Pre-process 32-bit data to kill the grid
+        cv::Mat smoothed;
+        // Median filter (3x3) kills single-pixel 'tile edge' noise
+        cv::medianBlur(depth32f_m, smoothed, 3);
 
-    // Correct clamping:
-    // 1) cap above vmax
-    cv::threshold(clipped, clipped, vmax, vmax, cv::THRESH_TRUNC);
-    // 2) clamp below vmin UP to vmin (not to zero!)
-    cv::max(clipped, vmin, clipped);
+        // 2. Normalization to 8-bit
+        cv::Mat clipped;
+        cv::threshold(smoothed, clipped, vmax, vmax, cv::THRESH_TRUNC);
+        cv::max(clipped, vmin, clipped);
+        clipped = (clipped - vmin) / (vmax - vmin);
 
-    cv::Mat depth_norm, depth_u8, depth_color;
-    depth_norm = (clipped - vmin) / (vmax - vmin);
-    depth_norm.convertTo(depth_u8, CV_8U, 255.0);
+        cv::Mat depth_u8;
+        clipped.convertTo(depth_u8, CV_8U, 255.0);
 
-    cv::applyColorMap(depth_u8, depth_color, cv::COLORMAP_TURBO);
+        // 3. Bilateral Filter: Sharpens edges (plant) while smoothing flat areas (walls)
+        cv::Mat denoised;
+        cv::bilateralFilter(depth_u8, denoised, 9, 75, 75);
 
-    // Paint invalid as black
-    for (int y = 0; y < depth32f_m.rows; ++y) {
-        const float* row = depth32f_m.ptr<float>(y);
-        cv::Vec3b* crow = depth_color.ptr<cv::Vec3b>(y);
-        for (int x = 0; x < depth32f_m.cols; ++x) {
-        float d = row[x];
-        if (!std::isfinite(d) || d <= 0.0f) crow[x] = cv::Vec3b(0,0,0);
-        }
-    }
+        // 4. Soft CLAHE (Higher tiles, lower limit)
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(1.0, cv::Size(32, 32));
+        cv::Mat enhanced_u8;
+        clahe->apply(denoised, enhanced_u8);
 
-    cv::imwrite(out_path_jpg, depth_color);
+        cv::Mat depth_color;
+        cv::applyColorMap(enhanced_u8, depth_color, cv::COLORMAP_INFERNO);
+        cv::imwrite(out_path_jpg, depth_color);
     }
 
     bool maxDepthInColumns(
@@ -351,6 +270,196 @@ void saveDepthColormap(const cv::Mat& depth32f_m,
     return std::filesystem::path(p).stem().string();
     }
 
+    std::vector<cv::Rect> iterTiles(int full_w, int full_h, const TileCfg& cfg)
+    {
+    std::vector<cv::Rect> tiles;
+
+    int y = 0;
+    while (true) {
+        if (y + cfg.tile_h >= full_h) y = std::max(0, full_h - cfg.tile_h);
+
+        int x = 0;
+        while (true) {
+        if (x + cfg.tile_w >= full_w) x = std::max(0, full_w - cfg.tile_w);
+
+        tiles.emplace_back(x, y, cfg.tile_w, cfg.tile_h);
+
+        if (x + cfg.tile_w >= full_w) break;
+        x += cfg.step_x();
+        }
+
+        if (y + cfg.tile_h >= full_h) break;
+        y += cfg.step_y();
+    }
+
+    return tiles;
+    }
+
+    cv::Mat blendWeights(int h, int w, int border_px) {
+        cv::Mat wy(h, 1, CV_32F), wx(1, w, CV_32F);
+        
+        auto smoothstep = [](float edge0, float edge1, float x) {
+            float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+            return t * t * (3.0f - 2.0f * t);
+        };
+
+        for (int y = 0; y < h; ++y) {
+            int dist = std::min(y, h - 1 - y);
+            wy.at<float>(y, 0) = smoothstep(0.0f, (float)border_px, (float)dist);
+        }
+        for (int x = 0; x < w; ++x) {
+            int dist = std::min(x, w - 1 - x);
+            wx.at<float>(0, x) = smoothstep(0.0f, (float)border_px, (float)dist);
+        }
+
+        cv::Mat weights = wy * wx; 
+
+        int kernel_size = border_px | 1; // Use the full fade width for the blur
+        if (kernel_size > 1) {
+            cv::GaussianBlur(weights, weights, cv::Size(kernel_size, kernel_size), 0);
+        }
+
+        return weights;
+    }
+
+    sensor_msgs::msg::CameraInfo croppedCamInfo(
+        const sensor_msgs::msg::CameraInfo& full,
+        int x0, int y0, int tile_w, int tile_h)
+    {
+        sensor_msgs::msg::CameraInfo ci = full;
+        ci.width = tile_w;
+        ci.height = tile_h;
+
+        // K: [fx 0 cx; 0 fy cy; 0 0 1]
+        ci.k[2] = full.k[2] - double(x0);
+        ci.k[5] = full.k[5] - double(y0);
+
+        // P: [fx 0 cx Tx; 0 fy cy Ty; 0 0 1 0]
+        ci.p[2] = full.p[2] - double(x0);
+        ci.p[6] = full.p[6] - double(y0);
+
+        return ci;
+    }
+
+    // static bool fitScaleShiftToReference(
+    // const cv::Mat& tile_depth,     // CV_32F
+    // const cv::Mat& ref_roi,        // CV_32F, same size
+    // double min_d, double max_d,
+    // float& out_a, float& out_b)
+    // {
+    // CV_Assert(tile_depth.type() == CV_32FC1);
+    // CV_Assert(ref_roi.type() == CV_32FC1);
+    // CV_Assert(tile_depth.size() == ref_roi.size());
+
+    // // Sample stats over valid pixels
+    // double sum_t = 0, sum_r = 0;
+    // double sum_tt = 0, sum_tr = 0;
+    // int n = 0;
+
+    // for (int y = 0; y < tile_depth.rows; ++y) {
+    //     const float* trow = tile_depth.ptr<float>(y);
+    //     const float* rrow = ref_roi.ptr<float>(y);
+    //     for (int x = 0; x < tile_depth.cols; ++x) {
+    //     const float t = trow[x];
+    //     const float r = rrow[x];
+    //     if (!std::isfinite(t) || !std::isfinite(r)) continue;
+    //     if (t < (float)min_d || t > (float)max_d) continue;
+    //     if (r < (float)min_d || r > (float)max_d) continue;
+
+    //     sum_t  += t;
+    //     sum_r  += r;
+    //     sum_tt += (double)t * (double)t;
+    //     sum_tr += (double)t * (double)r;
+    //     n++;
+    //     }
+    // }
+
+    // if (n < 500) return false;
+
+    // const double mean_t = sum_t / n;
+    // const double mean_r = sum_r / n;
+
+    // const double var_t = (sum_tt / n) - mean_t * mean_t;
+    // if (var_t < 1e-6) return false;
+
+    // const double cov_tr = (sum_tr / n) - mean_t * mean_r;
+
+    // const double a = cov_tr / var_t;
+    // const double b = mean_r - a * mean_t;
+
+    // // Clamp insane fits (optional but recommended)
+    // if (!std::isfinite(a) || !std::isfinite(b)) return false;
+    // if (a < 0.3 || a > 3.0) return false;
+
+    // out_a = (float)a;
+    // out_b = (float)b;
+    // return true;
+    // }
 
 
+   void normalizeTileGlobally(cv::Mat& tile, float global_min, float global_max) {
+        float range = global_max - global_min;
+        if (range < 1e-6f) return;
+        // Map tile values to 0.0 - 1.0 based on the global reference pass
+        tile = (tile - global_min) / range;
+    }
+
+    cv::Mat inferDepthTiled(
+    depth_anything_v3::TensorRTDepthAnything& da,
+    const cv::Mat& rgb_full,
+    const sensor_msgs::msg::CameraInfo& cam_full,
+    const TileCfg& cfg,
+    const cv::Mat& tile_weights,
+    int tile_fade_px) 
+    {
+        const int W = rgb_full.cols;
+        const int H = rgb_full.rows;
+
+        // --- STEP 1: Global Reference Pass ---
+        // We move 'ref' outside the brackets so it stays in scope
+        cv::Mat global_ref; 
+        {
+            da.initPreprocessBuffer(W, H);
+            if (!da.doInference({rgb_full}, cam_full, 1, false)) return cv::Mat();
+            global_ref = da.getDepthImage().clone(); // Clone to keep memory safe
+            cv::patchNaNs(global_ref, 0.0);
+        }
+
+        // --- STEP 2: Tiled Loop ---
+        da.initPreprocessBuffer(cfg.tile_w, cfg.tile_h);
+        cv::Mat acc(H, W, CV_32F, cv::Scalar(0));
+        cv::Mat wsum(H, W, CV_32F, cv::Scalar(0));
+
+        auto tiles = iterTiles(W, H, cfg);
+        for (const auto& r : tiles) {
+            cv::Mat rgb_tile = rgb_full(r);
+            auto cam_tile = croppedCamInfo(cam_full, r.x, r.y, r.width, r.height);
+
+            if (!da.doInference({rgb_tile}, cam_tile, 1, false)) continue;
+            cv::Mat d = da.getDepthImage().clone();
+            cv::patchNaNs(d, 0.0);
+
+            // 1. Align tile to global reference using Scale (a) and Shift (b)
+            cv::Mat ref_roi = global_ref(r); 
+            double mn_ref, mx_ref, mn_tile, mx_tile;
+            cv::minMaxLoc(ref_roi, &mn_ref, &mx_ref);
+            cv::minMaxLoc(d, &mn_tile, &mx_tile);
+
+            float shift = (float)mn_ref - (float)mn_tile;
+            d += shift;
+
+            cv::Mat acc_roi = acc(r);
+            cv::Mat wsum_roi = wsum(r);
+            acc_roi += d.mul(tile_weights);
+            wsum_roi += tile_weights;
+        }
+
+        cv::Mat result;
+        cv::divide(acc, wsum + 1e-6f, result); 
+        cv::patchNaNs(result, 0.0);
+        cv::Mat melted;
+        cv::medianBlur(result, melted, 3); 
+        return melted;
+    }
+        
 } // namespace depth_anything_helpers
