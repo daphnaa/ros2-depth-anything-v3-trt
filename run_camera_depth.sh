@@ -92,7 +92,7 @@ ros2 launch depth_anything_v3 camera_depth_rviz.launch.py \
     camera_id:=0 \
     camera_width:=640 \
     camera_height:=480 \
-    model_path:=src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.fp16.engine \
+    model_path:=onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-batch1.engine \
     publish_rate:=10.0 \
     downsample_factor:=1 \
     ${CALIB_PARAMS} \

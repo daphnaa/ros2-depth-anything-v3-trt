@@ -154,4 +154,4 @@ ros2 launch depth_anything_v3 video_depth_rviz.launch.py \
   playback_speed:=$SPEED \
   loop:=$LOOP \
   scale_factor:=$SCALE \
-  model_path:=src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.fp16.engine \
+  model_path:=src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-batch1.engine  \
