@@ -16,7 +16,6 @@ import torch
 from torch import nn
 
 import onnx
-import onnxruntime as ort
 from PIL import Image
 import torchvision.transforms as T
 import numpy as np
@@ -107,7 +106,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--demo-image",
         type=str,
-        default="assets/examples/ika/0006.jpg",
+        default="",
         help="Path to demo image for ONNX forward pass demo.",
     )
     parser.add_argument(
@@ -233,10 +232,14 @@ def run_onnx_demo(
     if not image_path.is_file():
         raise FileNotFoundError(f"Image not found: {image_path}")
 
-    if ort is None:
+    try:
+        import onnxruntime as ort
+    except Exception as e:
         raise RuntimeError(
-            "onnxruntime is not available or failed to import. Install a compatible onnxruntime or run export without demo."
-        )
+            "onnxruntime is not available or failed to import. "
+            "Install a compatible onnxruntime or run export without --demo-image."
+        ) from e
+
     sess = ort.InferenceSession(onnx_path.as_posix(), providers=["CPUExecutionProvider"])
     input_name = sess.get_inputs()[0].name
     target_h, target_w = _infer_size_from_input(sess.get_inputs()[0], default_h=518, default_w=518)
